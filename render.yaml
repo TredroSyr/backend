@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: tredro-backend
+    env: python
+    region: oregon
+    buildCommand: ./build.sh
+    startCommand: gunicorn config.wsgi:application --bind $GUNICORN_BIND --workers $GUNICORN_WORKERS
+    envVars:
+      - key: DJANGO_SETTINGS_MODULE
+        value: config.settings.production
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: DJANGO_DEBUG
+        value: False
+      - key: PYTHON_VERSION
+        value: 3.13.0
+    autoDeploy: true

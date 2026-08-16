@@ -41,6 +41,21 @@ def wait_for_postgres(timeout_seconds: int = 60) -> None:
 
 def main() -> None:
     wait_for_postgres()
+    
+    # Run migrations automatically on startup
+    print("Running database migrations...", flush=True)
+    import subprocess
+    result = subprocess.run(
+        ["python", "manage.py", "migrate", "--noinput"],
+        cwd="/app",
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"Migration failed: {result.stderr}", file=sys.stderr)
+        sys.exit(1)
+    print("Migrations completed successfully.", flush=True)
+    
     if len(sys.argv) < 2:
         print("No command provided to entrypoint.", file=sys.stderr)
         sys.exit(1)

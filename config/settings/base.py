@@ -58,7 +58,7 @@ INSTALLED_APPS = [
     "corsheaders",
     "rest_framework",
     "rest_framework_simplejwt",
-    "rest_framework_simplejwt.token_blacklist",
+    # Note: token_blacklist removed - incompatible with custom user models
     # Local apps
     "apps.health",
     "apps.authentication",
@@ -172,8 +172,8 @@ from datetime import timedelta
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(hours=1),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
-    "ROTATE_REFRESH_TOKENS": True,
-    "BLACKLIST_AFTER_ROTATION": True,
+    "ROTATE_REFRESH_TOKENS": False,  # Disabled - requires token_blacklist app
+    "BLACKLIST_AFTER_ROTATION": False,  # Disabled - requires token_blacklist app
     "UPDATE_LAST_LOGIN": False,  # Disabled because we use custom user models
     "ALGORITHM": "HS256",
     "SIGNING_KEY": SECRET_KEY,
@@ -182,7 +182,6 @@ SIMPLE_JWT = {
     "USER_ID_CLAIM": "user_id",
     "AUTH_TOKEN_CLASSES": ("rest_framework_simplejwt.tokens.AccessToken",),
     "TOKEN_TYPE_CLAIM": "token_type",
-    "CHECK_REVOKE_TOKEN": False,  # Disable OutstandingToken tracking
 }
 
 # Redis & Celery

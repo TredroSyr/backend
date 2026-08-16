@@ -306,7 +306,8 @@ class SignoutView(APIView):
     """
     POST /api/auth/signout
     
-    Blacklist the refresh token to sign out the user.
+    Client-side signout (token invalidation happens on client).
+    Note: Token blacklisting is disabled due to custom user models.
     """
     
     def post(self, request):
@@ -320,17 +321,12 @@ class SignoutView(APIView):
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
         
-        try:
-            refresh = RefreshToken(serializer.validated_data["refresh"])
-            refresh.blacklist()
-            
-            return success_response(
-                message="تم تسجيل الخروج بنجاح",
-                status_code=status.HTTP_200_OK,
-            )
-        except (InvalidToken, TokenError) as e:
-            return error_response(
-                message="رمز التحديث غير صالح",
-                errors={"refresh": [str(e)]},
-                status_code=status.HTTP_400_BAD_REQUEST,
-            )
+        # Note: Token blacklisting is disabled in this implementation
+        # Clients should remove tokens from local storage
+        # Access tokens will expire naturally after 1 hour
+        # Refresh tokens will expire after 7 days
+        
+        return success_response(
+            message="تم تسجيل الخروج بنجاح",
+            status_code=status.HTTP_200_OK,
+        )

@@ -60,7 +60,15 @@ def generate_tokens_for_subuser(
     Generate JWT access and refresh tokens for a SubUser.
     Includes custom claims: actor_type, company_id, is_owner.
     """
-    refresh = RefreshToken.for_user(subuser)
+    # Create a minimal user wrapper to avoid OutstandingToken issues
+    class TokenUser:
+        def __init__(self, pk: int):
+            self.pk = pk
+            self.id = pk
+            self.is_active = True
+    
+    token_user = TokenUser(subuser.id)
+    refresh = RefreshToken.for_user(token_user)
     
     # Add custom claims
     refresh["actor_type"] = "subuser"

@@ -6,8 +6,13 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
-from apps.companies.models import Company
-from apps.companies.serializers import CompanyOnboardingSerializer, CompanySerializer
+from apps.companies.models import Company, SubUser
+from apps.companies.serializers import (
+    CompanyOnboardingSerializer,
+    CompanySerializer,
+    CreateSubUserSerializer,
+    SubUserDetailSerializer,
+)
 from core.responses import error_response, success_response
 
 
@@ -313,5 +318,183 @@ class CompanyBusinessTypesView(APIView):
         
         return success_response(
             data={"business_types": business_types},
+            status_code=status.HTTP_200_OK,
+        )
+
+
+class SubUserCreateView(APIView):
+    """
+    POST /api/companies/subusers
+    
+    Create a new sub-user with module permissions.
+    Only company owner can create sub-users.
+    
+    Request body:
+    {
+        "name": "User Name",
+        "phone": "0912345678",
+        "email": "user@example.com",  # optional
+        "password": "secure_password",
+        "permissions": [
+            {
+                "module": "customers",
+                "can_view": true,
+                "can_action": false
+            },
+            {
+                "module": "orders",
+                "can_view": true,
+                "can_action": true
+            }
+        ]
+    }
+    """
+    
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        """Create a new sub-user."""
+        company_id = getattr(request, "company_id", None)
+        
+        if not company_id:
+            return error_response(
+                message="لم يتم العثور على معلومات الشركة",
+                errors={"company": ["يجب أن تكون مسجلاً كمستخدم شركة"]},
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+        
+        try:
+            company = Company.objects.get(id=company_id)
+        except Company.DoesNotExist:
+            return error_response(
+                message="الشركة غير موجودة",
+                errors={"company": ["لم يتم العثور على الشركة"]},
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        
+        # Check if the current user is the company owner
+        subuser_id = getattr(request, "subuser_id", None)
+        if subuser_id:
+            try:
+                current_user = SubUser.objects.get(id=subuser_id, company=company)
+                if not current_user.is_owner:
+                    return error_response(
+                        message="غير مصرح",
+                        errors={"permission": ["فقط مالك الشركة يمكنه إضافة مستخدمين فرعيين"]},
+                        status_code=status.HTTP_403_FORBIDDEN,
+                    )
+            except SubUser.DoesNotExist:
+                return error_response(
+                    message="المستخدم غير موجود",
+                    status_code=status.HTTP_404_NOT_FOUND,
+                )
+        
+        # Create the sub-user
+        serializer = CreateSubUserSerializer(
+            data=request.data,
+            context={"company": company},
+        )
+        
+        if not serializer.is_valid():
+            return error_response(
+                message="بيانات غير صالحة",
+                errors=serializer.errors,
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        sub_user = serializer.save()
+        
+        # Return the created sub-user with permissions
+        return success_response(
+            data={"subuser": SubUserDetailSerializer(sub_user).data},
+            message="تم إنشاء المستخدم الفرعي بنجاح",
+            status_code=status.HTTP_201_CREATED,
+        )
+
+
+class SubUserListView(APIView):
+    """
+    GET /api/companies/subusers
+    
+    List all sub-users for the company with their permissions.
+    """
+    
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        """List all sub-users."""
+        company_id = getattr(request, "company_id", None)
+        
+        if not company_id:
+            return error_response(
+                message="لم يتم العثور على معلومات الشركة",
+                errors={"company": ["يجب أن تكون مسجلاً كمستخدم شركة"]},
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+        
+        try:
+            company = Company.objects.get(id=company_id)
+        except Company.DoesNotExist:
+            return error_response(
+                message="الشركة غير موجودة",
+                errors={"company": ["لم يتم العثور على الشركة"]},
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        
+        # Get all sub-users for this company
+        subusers = SubUser.objects.filter(company=company).select_related("role")
+        
+        return success_response(
+            data={"subusers": SubUserDetailSerializer(subusers, many=True).data},
+            status_code=status.HTTP_200_OK,
+        )
+
+
+class ModuleListView(APIView):
+    """
+    GET /api/companies/modules
+    
+    Get list of available modules for permission assignment.
+    """
+    
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        """Get available modules."""
+        modules = [
+            {
+                "value": "customers",
+                "label": "العملاء",
+                "label_en": "Customers",
+            },
+            {
+                "value": "invoices",
+                "label": "الفواتير",
+                "label_en": "Invoices",
+            },
+            {
+                "value": "orders",
+                "label": "الطلبات",
+                "label_en": "Orders",
+            },
+            {
+                "value": "products",
+                "label": "المنتجات",
+                "label_en": "Products",
+            },
+            {
+                "value": "reps",
+                "label": "المندوبين",
+                "label_en": "Representatives",
+            },
+            {
+                "value": "notifications",
+                "label": "الإشعارات",
+                "label_en": "Notifications",
+            },
+        ]
+        
+        return success_response(
+            data={"modules": modules},
             status_code=status.HTTP_200_OK,
         )

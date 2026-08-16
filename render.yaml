@@ -3,6 +3,7 @@ services:
     name: tredro-backend
     env: python
     region: oregon
+    branch: dev
     buildCommand: ./build.sh
     startCommand: gunicorn config.wsgi:application --bind $GUNICORN_BIND --workers $GUNICORN_WORKERS
     envVars:

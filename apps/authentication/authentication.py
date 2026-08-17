@@ -93,6 +93,14 @@ class MultiActorJWTAuthentication(JWTAuthentication):
                 code="user_load_error",
             )
         
+        # DRF permission classes (IsAuthenticated, etc.) and other Django/DRF
+        # internals expect request.user to expose is_authenticated/is_anonymous.
+        # Our actor models don't inherit from AbstractBaseUser so they lack
+        # these natively. A token that reached this point has already passed
+        # full JWT validation, so it's safe to stamp these on directly.
+        user.is_authenticated = True
+        user.is_anonymous = False
+        
         return user
     
     def _get_subuser(self, user_id: int, company_id: int | None) -> SubUser:
@@ -254,8 +262,5 @@ class MultiActorJWTAuthentication(JWTAuthentication):
         request.actor_type = token_payload.get("actor_type")
         request.is_owner = token_payload.get("is_owner", False)
         request.token_payload = token_payload
-        
-        # Also attach the resolved user object as request.user for compatibility
-        request.user = user
         
         return user, validated_token

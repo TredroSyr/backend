@@ -33,7 +33,7 @@ class MultiActorJWTAuthentication(JWTAuthentication):
     2. Extracts actor_type from the token payload
     3. Queries the appropriate model based on actor_type
     4. Enforces company_id scoping for tenant-scoped actors
-    5. Sets request.actor_type, request.is_owner, and request.token_payload
+    5. Sets request.actor_type, request.company_id, request.is_owner, and request.token_payload
     """
     
     def get_user(self, validated_token: Token) -> SubUser | Rep | Customer:
@@ -260,6 +260,7 @@ class MultiActorJWTAuthentication(JWTAuthentication):
         
         # Attach custom attributes to request for permissions/middleware
         request.actor_type = token_payload.get("actor_type")
+        request.company_id = token_payload.get("company_id")
         request.is_owner = token_payload.get("is_owner", False)
         request.token_payload = token_payload
         

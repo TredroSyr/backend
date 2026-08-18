@@ -254,3 +254,93 @@ class SubUserDetailSerializer(serializers.ModelSerializer):
             }
             for perm in permissions
         ]
+
+
+class UpdateSubUserSerializer(serializers.ModelSerializer):
+    """Serializer for updating a sub-user with permissions."""
+    
+    permissions = ModulePermissionSerializer(many=True, required=False)
+    password = serializers.CharField(
+        write_only=True, min_length=6, max_length=128, required=False
+    )
+    
+    class Meta:
+        model = SubUser
+        fields = [
+            "name",
+            "phone",
+            "email",
+            "is_active",
+            "password",
+            "permissions",
+        ]
+    
+    def validate_permissions(self, value):
+        """Validate permissions if provided."""
+        if not value:
+            return value
+        
+        # Validate that each permission has at least can_view enabled
+        for perm in value:
+            if not perm.get("can_view") and not perm.get("can_action"):
+                raise serializers.ValidationError(
+                    f"يجب تفعيل صلاحية العرض أو الإجراء للوحدة {perm.get('module')}"
+                )
+        
+        # Check for duplicate modules
+        modules = [perm.get("module") for perm in value]
+        if len(modules) != len(set(modules)):
+            raise serializers.ValidationError("لا يمكن تحديد صلاحيات مكررة لنفس الوحدة")
+        
+        return value
+    
+    def validate_phone(self, value):
+        """Validate that phone is unique within the company (excluding current user)."""
+        company = self.context.get("company")
+        if not company:
+            raise serializers.ValidationError("لم يتم العثور على معلومات الشركة")
+        
+        # Exclude the current user from the uniqueness check
+        queryset = SubUser.objects.filter(company=company, phone=value)
+        if self.instance:
+            queryset = queryset.exclude(id=self.instance.id)
+        
+        if queryset.exists():
+            raise serializers.ValidationError("رقم الهاتف مستخدم بالفعل في هذه الشركة")
+        
+        return value
+    
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        """Update sub-user and optionally their permissions."""
+        permissions_data = validated_data.pop("permissions", None)
+        password = validated_data.pop("password", None)
+        
+        # Update basic fields
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        
+        # Update password if provided
+        if password:
+            instance.password = make_password(password)
+        
+        # Update permissions if provided
+        if permissions_data is not None:
+            company = self.context.get("company")
+            
+            # Delete existing permissions
+            if instance.role:
+                ModulePermission.objects.filter(role=instance.role).delete()
+                
+                # Create new permissions
+                for perm_data in permissions_data:
+                    ModulePermission.objects.create(
+                        company=company,
+                        role=instance.role,
+                        module=perm_data["module"],
+                        can_view=perm_data["can_view"],
+                        can_action=perm_data["can_action"],
+                    )
+        
+        instance.save()
+        return instance

@@ -498,3 +498,134 @@ class ModuleListView(APIView):
             data={"modules": modules},
             status_code=status.HTTP_200_OK,
         )
+
+
+class SubUserDetailView(APIView):
+    """
+    PATCH /api/companies/subusers/<id>
+    DELETE /api/companies/subusers/<id>
+    
+    Update or delete a sub-user.
+    Only company owner can perform these actions.
+    Owner cannot be deleted or modified through this endpoint.
+    """
+    
+    permission_classes = [IsAuthenticated]
+    
+    def _get_company_and_check_owner(self, request):
+        """Helper to get company and verify ownership."""
+        company_id = getattr(request, "company_id", None)
+        
+        if not company_id:
+            return None, error_response(
+                message="لم يتم العثور على معلومات الشركة",
+                errors={"company": ["يجب أن تكون مسجلاً كمستخدم شركة"]},
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+        
+        try:
+            company = Company.objects.get(id=company_id)
+        except Company.DoesNotExist:
+            return None, error_response(
+                message="الشركة غير موجودة",
+                errors={"company": ["لم يتم العثور على الشركة"]},
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        
+        # Check if the current user is the company owner
+        subuser_id = getattr(request, "subuser_id", None)
+        if subuser_id:
+            try:
+                current_user = SubUser.objects.get(id=subuser_id, company=company)
+                if not current_user.is_owner:
+                    return None, error_response(
+                        message="غير مصرح",
+                        errors={"permission": ["فقط مالك الشركة يمكنه تعديل أو حذف المستخدمين الفرعيين"]},
+                        status_code=status.HTTP_403_FORBIDDEN,
+                    )
+            except SubUser.DoesNotExist:
+                return None, error_response(
+                    message="المستخدم غير موجود",
+                    status_code=status.HTTP_404_NOT_FOUND,
+                )
+        
+        return company, None
+    
+    def patch(self, request, subuser_id):
+        """Update sub-user details and permissions."""
+        from apps.companies.serializers import UpdateSubUserSerializer
+        
+        company, error = self._get_company_and_check_owner(request)
+        if error:
+            return error
+        
+        # Get the sub-user to update
+        try:
+            sub_user = SubUser.objects.get(id=subuser_id, company=company)
+        except SubUser.DoesNotExist:
+            return error_response(
+                message="المستخدم الفرعي غير موجود",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        
+        # Cannot modify the owner through this endpoint
+        if sub_user.is_owner:
+            return error_response(
+                message="غير مصرح",
+                errors={"permission": ["لا يمكن تعديل حساب المالك"]},
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+        
+        # Update the sub-user
+        serializer = UpdateSubUserSerializer(
+            sub_user,
+            data=request.data,
+            partial=True,
+            context={"company": company},
+        )
+        
+        if not serializer.is_valid():
+            return error_response(
+                message="بيانات غير صالحة",
+                errors=serializer.errors,
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        sub_user = serializer.save()
+        
+        return success_response(
+            data={"subuser": SubUserDetailSerializer(sub_user).data},
+            message="تم تحديث المستخدم الفرعي بنجاح",
+            status_code=status.HTTP_200_OK,
+        )
+    
+    def delete(self, request, subuser_id):
+        """Delete a sub-user."""
+        company, error = self._get_company_and_check_owner(request)
+        if error:
+            return error
+        
+        # Get the sub-user to delete
+        try:
+            sub_user = SubUser.objects.get(id=subuser_id, company=company)
+        except SubUser.DoesNotExist:
+            return error_response(
+                message="المستخدم الفرعي غير موجود",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        
+        # Cannot delete the owner
+        if sub_user.is_owner:
+            return error_response(
+                message="غير مصرح",
+                errors={"permission": ["لا يمكن حذف حساب المالك"]},
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+        
+        # Delete the sub-user (role will be kept for audit purposes)
+        sub_user.delete()
+        
+        return success_response(
+            message="تم حذف المستخدم الفرعي بنجاح",
+            status_code=status.HTTP_200_OK,
+        )

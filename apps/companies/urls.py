@@ -11,6 +11,7 @@ from apps.companies.views import (
     CompanyOnboardingView,
     ModuleListView,
     SubUserCreateView,
+    SubUserDetailView,
     SubUserListView,
 )
 
@@ -52,5 +53,10 @@ urlpatterns = [
         "companies/subusers/list",
         SubUserListView.as_view(),
         name="subuser-list",
+    ),
+    path(
+        "companies/subusers/<int:subuser_id>",
+        SubUserDetailView.as_view(),
+        name="subuser-detail",
     ),
 ]

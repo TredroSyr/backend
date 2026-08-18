@@ -240,7 +240,7 @@ class MultiActorJWTAuthentication(JWTAuthentication):
         This method:
         1. Validates the JWT token (via parent class)
         2. Resolves the actor (via get_user)
-        3. Attaches request.actor_type, request.is_owner, request.token_payload
+        3. Attaches request.actor_type, request.company_id, request.is_owner, request.token_payload
         
         Args:
             request: The HTTP request

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from django.urls import path
+from django.urls import include, path
+from rest_framework.routers import DefaultRouter
 
 from apps.companies.views import (
     CompanyBusinessTypesView,
@@ -10,10 +11,15 @@ from apps.companies.views import (
     CompanyOnboardingStatusView,
     CompanyOnboardingView,
     ModuleListView,
+    RepViewSet,
     SubUserCreateView,
     SubUserDetailView,
     SubUserListView,
 )
+
+# Create a router for viewsets
+router = DefaultRouter()
+router.register(r"companies/reps", RepViewSet, basename="rep")
 
 urlpatterns = [
     # Onboarding
@@ -59,4 +65,6 @@ urlpatterns = [
         SubUserDetailView.as_view(),
         name="subuser-detail",
     ),
+    # Include router URLs for viewsets
+    path("", include(router.urls)),
 ]

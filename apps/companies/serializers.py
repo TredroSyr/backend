@@ -8,6 +8,7 @@ from django.utils import timezone
 from rest_framework import serializers
 
 from apps.companies.models import Company, ModulePermission, Role, SubUser
+from apps.reps.models import Rep
 
 
 class CompanySerializer(serializers.ModelSerializer):
@@ -344,3 +345,88 @@ class UpdateSubUserSerializer(serializers.ModelSerializer):
         
         instance.save()
         return instance
+
+
+class RepSerializer(serializers.ModelSerializer):
+    """Serializer for Rep model."""
+    
+    class Meta:
+        model = Rep
+        fields = [
+            "id",
+            "name",
+            "phone",
+            "password",
+            "referral_code",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "created_at", "updated_at"]
+        extra_kwargs = {
+            "password": {"write_only": True},
+        }
+    
+    def validate_phone(self, value):
+        """Validate that phone is unique within the company."""
+        company = self.context.get("company")
+        if not company:
+            raise serializers.ValidationError("لم يتم العثور على معلومات الشركة")
+        
+        # For updates, exclude the current rep
+        queryset = Rep.objects.filter(company=company, phone=value)
+        if self.instance:
+            queryset = queryset.exclude(id=self.instance.id)
+        
+        if queryset.exists():
+            raise serializers.ValidationError("رقم الهاتف مستخدم بالفعل لمندوب آخر في هذه الشركة")
+        
+        return value
+    
+    def validate_referral_code(self, value):
+        """Validate that referral code is unique globally."""
+        queryset = Rep.objects.filter(referral_code=value)
+        if self.instance:
+            queryset = queryset.exclude(id=self.instance.id)
+        
+        if queryset.exists():
+            raise serializers.ValidationError("كود الإحالة مستخدم بالفعل")
+        
+        return value
+    
+    def create(self, validated_data):
+        """Create a new rep with hashed password."""
+        company = self.context.get("company")
+        if not company:
+            raise serializers.ValidationError("لم يتم العثور على معلومات الشركة")
+        
+        # Hash the password
+        validated_data["password"] = make_password(validated_data["password"])
+        validated_data["company"] = company
+        
+        return super().create(validated_data)
+    
+    def update(self, instance, validated_data):
+        """Update rep, hashing password if provided."""
+        # Hash password if it's being updated
+        if "password" in validated_data:
+            validated_data["password"] = make_password(validated_data["password"])
+        
+        return super().update(instance, validated_data)
+
+
+class RepListSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for listing reps (without password)."""
+    
+    class Meta:
+        model = Rep
+        fields = [
+            "id",
+            "name",
+            "phone",
+            "referral_code",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields

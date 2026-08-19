@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
-from rest_framework import status
+from rest_framework import status, viewsets
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
+from apps.companies.mixins import TenantScopedViewMixin
 from apps.companies.models import Company, SubUser
+from apps.reps.models import Rep
 from apps.companies.serializers import (
     CompanyOnboardingSerializer,
     CompanySerializer,
     CreateSubUserSerializer,
+    RepListSerializer,
+    RepSerializer,
     SubUserDetailSerializer,
 )
 from core.responses import error_response, success_response
@@ -627,5 +631,117 @@ class SubUserDetailView(APIView):
         
         return success_response(
             message="تم حذف المستخدم الفرعي بنجاح",
+            status_code=status.HTTP_200_OK,
+        )
+
+
+
+class RepViewSet(TenantScopedViewMixin, viewsets.ModelViewSet):
+    """
+    ViewSet for managing company reps.
+    
+    Provides CRUD operations for sales representatives:
+    - GET /api/companies/reps - List all reps for the company
+    - POST /api/companies/reps - Create a new rep
+    - GET /api/companies/reps/{id} - Get rep details
+    - PATCH /api/companies/reps/{id} - Update rep details
+    - PUT /api/companies/reps/{id} - Full update of rep
+    - DELETE /api/companies/reps/{id} - Delete a rep
+    """
+    
+    permission_classes = [IsAuthenticated]
+    queryset = Rep.objects.all()
+    
+    def get_serializer_class(self):
+        """Use different serializers for list vs detail operations."""
+        if self.action == "list":
+            return RepListSerializer
+        return RepSerializer
+    
+    def get_serializer_context(self):
+        """Add company to serializer context."""
+        context = super().get_serializer_context()
+        company_id = getattr(self.request, "company_id", None)
+        
+        if company_id:
+            try:
+                context["company"] = Company.objects.get(id=company_id)
+            except Company.DoesNotExist:
+                pass
+        
+        return context
+    
+    def list(self, request, *args, **kwargs):
+        """List all reps for the company."""
+        queryset = self.filter_queryset(self.get_queryset())
+        serializer = self.get_serializer(queryset, many=True)
+        
+        return success_response(
+            data={"reps": serializer.data},
+            status_code=status.HTTP_200_OK,
+        )
+    
+    def create(self, request, *args, **kwargs):
+        """Create a new rep."""
+        serializer = self.get_serializer(data=request.data)
+        
+        if not serializer.is_valid():
+            return error_response(
+                message="بيانات غير صالحة",
+                errors=serializer.errors,
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        rep = serializer.save()
+        
+        return success_response(
+            data={"rep": RepListSerializer(rep).data},
+            message="تم إضافة المندوب بنجاح",
+            status_code=status.HTTP_201_CREATED,
+        )
+    
+    def retrieve(self, request, *args, **kwargs):
+        """Get rep details."""
+        instance = self.get_object()
+        serializer = RepListSerializer(instance)
+        
+        return success_response(
+            data={"rep": serializer.data},
+            status_code=status.HTTP_200_OK,
+        )
+    
+    def update(self, request, *args, **kwargs):
+        """Full update of rep details."""
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        
+        if not serializer.is_valid():
+            return error_response(
+                message="بيانات غير صالحة",
+                errors=serializer.errors,
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        rep = serializer.save()
+        
+        return success_response(
+            data={"rep": RepListSerializer(rep).data},
+            message="تم تحديث بيانات المندوب بنجاح",
+            status_code=status.HTTP_200_OK,
+        )
+    
+    def partial_update(self, request, *args, **kwargs):
+        """Partial update of rep details."""
+        kwargs["partial"] = True
+        return self.update(request, *args, **kwargs)
+    
+    def destroy(self, request, *args, **kwargs):
+        """Delete a rep."""
+        instance = self.get_object()
+        instance.delete()
+        
+        return success_response(
+            message="تم حذف المندوب بنجاح",
             status_code=status.HTTP_200_OK,
         )

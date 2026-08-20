@@ -91,6 +91,66 @@ class RepSigninSerializer(serializers.Serializer):
         return normalize_phone(value)
 
 
+class CustomerSignupSerializer(serializers.Serializer):
+    """Serializer for customer self-registration."""
+    
+    name = serializers.CharField(max_length=255, required=True)
+    phone = serializers.CharField(max_length=32, required=True)
+    password = serializers.CharField(min_length=6, write_only=True, required=True)
+    email = serializers.EmailField(required=False, allow_blank=True)
+    referral_code = serializers.CharField(max_length=32, required=False, allow_blank=True)
+    latitude = serializers.DecimalField(max_digits=9, decimal_places=6, required=False, allow_null=True)
+    longitude = serializers.DecimalField(max_digits=9, decimal_places=6, required=False, allow_null=True)
+    
+    def validate_phone(self, value: str) -> str:
+        """Validate and normalize phone number."""
+        from apps.customers.models import Customer
+        
+        normalized = normalize_phone(value)
+        
+        if not validate_phone(normalized):
+            raise serializers.ValidationError(
+                "رقم الهاتف غير صحيح. الصيغة المطلوبة: +963XXXXXXXXX"
+            )
+        
+        if Customer.objects.filter(phone=normalized).exists():
+            raise serializers.ValidationError("رقم الهاتف مستخدم من قبل")
+        
+        return normalized
+    
+    def validate_referral_code(self, value: str) -> str:
+        """Validate referral code exists if provided."""
+        from apps.reps.models import Rep
+        
+        if value and not Rep.objects.filter(referral_code=value, is_active=True).exists():
+            raise serializers.ValidationError("كود الإحالة غير صحيح أو غير نشط")
+        
+        return value
+    
+    def validate(self, data):
+        """Cross-field validation for GPS coordinates."""
+        latitude = data.get("latitude")
+        longitude = data.get("longitude")
+        
+        if (latitude is not None) != (longitude is not None):
+            raise serializers.ValidationError({
+                "location": "يجب تقديم خطوط الطول والعرض معاً أو تركهما فارغين"
+            })
+        
+        return data
+
+
+class CustomerSigninSerializer(serializers.Serializer):
+    """Serializer for customer sign-in."""
+    
+    phone = serializers.CharField(required=True)
+    password = serializers.CharField(write_only=True, required=True)
+    
+    def validate_phone(self, value: str) -> str:
+        """Normalize phone number."""
+        return normalize_phone(value)
+
+
 class TokenRefreshSerializer(serializers.Serializer):
     """Serializer for token refresh."""
     

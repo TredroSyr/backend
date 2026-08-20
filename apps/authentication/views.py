@@ -13,11 +13,14 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from apps.authentication.serializers import (
     CompanySigninSerializer,
     CompanySignupSerializer,
+    CustomerSigninSerializer,
+    CustomerSignupSerializer,
     RepSigninSerializer,
     SignoutSerializer,
     TokenRefreshSerializer,
 )
 from apps.authentication.utils import (
+    generate_tokens_for_customer,
     generate_tokens_for_rep,
     generate_tokens_for_subuser,
     get_permissions_for_subuser,
@@ -27,6 +30,7 @@ from apps.authentication.utils import (
 from apps.billing.services import create_trial_subscription
 from apps.companies.models import Company, SubUser
 from apps.companies.serializers import CompanySerializer, SubUserSerializer
+from apps.customers.models import Customer
 from apps.reps.models import Rep
 from core.responses import error_response, success_response
 
@@ -328,5 +332,159 @@ class SignoutView(APIView):
         
         return success_response(
             message="تم تسجيل الخروج بنجاح",
+            status_code=status.HTTP_200_OK,
+        )
+
+
+
+class CustomerSignupView(APIView):
+    """
+    POST /api/auth/customer/signup
+    
+    Customer self-registration. Optionally accepts referral_code for auto-assignment to rep.
+    """
+    
+    permission_classes = [AllowAny]
+    
+    @transaction.atomic
+    def post(self, request):
+        """Handle customer signup."""
+        serializer = CustomerSignupSerializer(data=request.data)
+        
+        if not serializer.is_valid():
+            return error_response(
+                message="فشل إنشاء الحساب",
+                errors=serializer.errors,
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        data = serializer.validated_data
+        
+        # Find rep by referral code if provided
+        assigned_rep = None
+        if data.get("referral_code"):
+            try:
+                assigned_rep = Rep.objects.get(
+                    referral_code=data["referral_code"],
+                    is_active=True,
+                )
+            except Rep.DoesNotExist:
+                pass  # Validation already caught this, but be defensive
+        
+        # Create customer
+        customer = Customer.objects.create(
+            name=data["name"],
+            phone=data["phone"],
+            email=data.get("email") or None,
+            password=hash_password(data["password"]),
+            assigned_rep=assigned_rep,
+            referral_code_used=data.get("referral_code") or None,  # Store original referral code
+            latitude=data.get("latitude"),
+            longitude=data.get("longitude"),
+            is_active=True,
+        )
+        
+        # Generate JWT tokens
+        tokens = generate_tokens_for_customer(customer)
+        
+        # Prepare response
+        customer_data = {
+            "id": customer.id,
+            "name": customer.name,
+            "phone": customer.phone,
+            "email": customer.email,
+            "assigned_rep": {
+                "id": assigned_rep.id,
+                "name": assigned_rep.name,
+                "phone": assigned_rep.phone,
+            } if assigned_rep else None,
+            "referral_code_used": customer.referral_code_used,
+            "has_location": customer.latitude is not None,
+        }
+        
+        return success_response(
+            data={
+                "customer": customer_data,
+                "tokens": tokens,
+            },
+            message="تم إنشاء الحساب بنجاح",
+            status_code=status.HTTP_201_CREATED,
+        )
+
+
+class CustomerSigninView(APIView):
+    """
+    POST /api/auth/customer/signin
+    
+    Authenticate a customer and return JWT tokens.
+    """
+    
+    permission_classes = [AllowAny]
+    
+    def post(self, request):
+        """Handle customer signin."""
+        serializer = CustomerSigninSerializer(data=request.data)
+        
+        if not serializer.is_valid():
+            return error_response(
+                message="بيانات الدخول غير صحيحة",
+                errors=serializer.errors,
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        phone = serializer.validated_data["phone"]
+        password = serializer.validated_data["password"]
+        
+        # Find Customer by phone
+        try:
+            customer = Customer.objects.select_related("assigned_rep").get(phone=phone)
+        except Customer.DoesNotExist:
+            return error_response(
+                message="رقم الهاتف أو كلمة المرور غير صحيحة",
+                errors={"credentials": ["بيانات الدخول غير صحيحة"]},
+                status_code=status.HTTP_401_UNAUTHORIZED,
+            )
+        
+        # Verify password
+        if not verify_password(password, customer.password):
+            return error_response(
+                message="رقم الهاتف أو كلمة المرور غير صحيحة",
+                errors={"credentials": ["بيانات الدخول غير صحيحة"]},
+                status_code=status.HTTP_401_UNAUTHORIZED,
+            )
+        
+        # Check if customer is active
+        if not customer.is_active:
+            return error_response(
+                message="الحساب غير نشط",
+                errors={"account": ["تم تعطيل هذا الحساب. يرجى التواصل مع الدعم الفني"]},
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+        
+        # Generate JWT tokens
+        tokens = generate_tokens_for_customer(customer)
+        
+        # Prepare response
+        customer_data = {
+            "id": customer.id,
+            "name": customer.name,
+            "phone": customer.phone,
+            "email": customer.email,
+            "assigned_rep": {
+                "id": customer.assigned_rep.id,
+                "name": customer.assigned_rep.name,
+                "phone": customer.assigned_rep.phone,
+            } if customer.assigned_rep else None,
+            "referral_code_used": customer.referral_code_used,
+            "has_location": customer.latitude is not None,
+            "is_active": customer.is_active,
+        }
+        
+        return success_response(
+            data={
+                "customer": customer_data,
+                "tokens": tokens,
+            },
+            message="تم تسجيل الدخول بنجاح",
             status_code=status.HTTP_200_OK,
         )

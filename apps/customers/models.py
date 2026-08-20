@@ -8,6 +8,9 @@ class Customer(models.Model):
 
     assigned_rep is the §3 referral/admin assignment field. Per-company assignment
     vs a single global FK is still §7. Trade-license image is §7 — no column.
+    
+    referral_code_used tracks the original referral code used during signup for
+    attribution/analytics, separate from assigned_rep which can be changed by admin.
     """
 
     name = models.CharField(max_length=255)
@@ -20,6 +23,12 @@ class Customer(models.Model):
         null=True,
         blank=True,
         related_name="assigned_customers",
+    )
+    referral_code_used = models.CharField(
+        max_length=32,
+        null=True,
+        blank=True,
+        help_text="Original referral code used during signup (immutable for tracking)",
     )
     latitude = models.DecimalField(
         max_digits=9, decimal_places=6, null=True, blank=True
@@ -36,6 +45,7 @@ class Customer(models.Model):
         indexes = [
             models.Index(fields=["phone"], name="customer_phone_idx"),
             models.Index(fields=["assigned_rep"], name="customer_assigned_rep_idx"),
+            models.Index(fields=["referral_code_used"], name="customer_referral_code_idx"),
         ]
 
     def __str__(self) -> str:

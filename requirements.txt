@@ -8,6 +8,9 @@ Pillow>=10.4,<11
 # Database
 psycopg[binary]>=3.2,<4
 
+# Excel processing
+openpyxl>=3.1,<4
+
 # Task queue
 celery[redis]>=5.4,<6
 redis>=5.0,<6

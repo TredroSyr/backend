@@ -341,15 +341,17 @@ class CustomerSignupView(APIView):
     """
     POST /api/auth/customer/signup
     
-    Customer self-registration. Optionally accepts referral_code for auto-assignment to rep.
+    Customer self-registration. If customer was created manually by company without
+    password, they can complete signup by setting password. Optionally accepts 
+    referral_code for auto-assignment to rep.
     """
     
     permission_classes = [AllowAny]
     
     @transaction.atomic
     def post(self, request):
-        """Handle customer signup."""
-        serializer = CustomerSignupSerializer(data=request.data)
+        """Handle customer signup or completing signup."""
+        serializer = CustomerSignupSerializer(data=request.data, context={'request': request})
         
         if not serializer.is_valid():
             return error_response(
@@ -360,32 +362,72 @@ class CustomerSignupView(APIView):
         
         data = serializer.validated_data
         
-        # Find rep by referral code if provided
-        assigned_rep = None
-        if data.get("referral_code"):
-            try:
-                assigned_rep = Rep.objects.get(
-                    referral_code=data["referral_code"],
-                    is_active=True,
-                )
-            except Rep.DoesNotExist:
-                pass  # Validation already caught this, but be defensive
+        # Check if customer already exists (from context set in validation)
+        existing_customer = serializer.context.get('existing_customer')
         
-        # Create customer
-        customer = Customer.objects.create(
-            name=data["name"],
-            phone=data["phone"],
-            email=data.get("email") or None,
-            password=hash_password(data["password"]),
-            assigned_rep=assigned_rep,
-            referral_code_used=data.get("referral_code") or None,  # Store original referral code
-            latitude=data.get("latitude"),
-            longitude=data.get("longitude"),
-            is_active=True,
-        )
+        if existing_customer:
+            # Customer was created manually by company, now completing signup
+            existing_customer.password = hash_password(data["password"])
+            if data.get("email"):
+                existing_customer.email = data["email"]
+            if data.get("category"):
+                existing_customer.category = data["category"]
+            if data.get("latitude") and data.get("longitude"):
+                existing_customer.latitude = data["latitude"]
+                existing_customer.longitude = data["longitude"]
+            
+            # Handle referral code if provided
+            if data.get("referral_code"):
+                try:
+                    rep = Rep.objects.get(
+                        referral_code=data["referral_code"],
+                        is_active=True,
+                    )
+                    existing_customer.assigned_reps.add(rep)
+                    existing_customer.referral_code_used = data["referral_code"]
+                except Rep.DoesNotExist:
+                    pass
+            
+            existing_customer.save()
+            customer = existing_customer
+        else:
+            # New customer signup
+            customer = Customer.objects.create(
+                name=data["name"],
+                phone=data["phone"],
+                email=data.get("email") or None,
+                password=hash_password(data["password"]),
+                category=data.get("category") or None,
+                referral_code_used=data.get("referral_code") or None,
+                latitude=data.get("latitude"),
+                longitude=data.get("longitude"),
+                is_active=True,
+            )
+            
+            # Assign to rep if referral code provided
+            if data.get("referral_code"):
+                try:
+                    rep = Rep.objects.get(
+                        referral_code=data["referral_code"],
+                        is_active=True,
+                    )
+                    customer.assigned_reps.add(rep)
+                except Rep.DoesNotExist:
+                    pass
         
         # Generate JWT tokens
         tokens = generate_tokens_for_customer(customer)
+        
+        # Get all assigned reps
+        assigned_reps = [
+            {
+                "id": rep.id,
+                "name": rep.name,
+                "phone": rep.phone,
+                "company_id": rep.company_id,
+            }
+            for rep in customer.assigned_reps.all()
+        ]
         
         # Prepare response
         customer_data = {
@@ -393,11 +435,8 @@ class CustomerSignupView(APIView):
             "name": customer.name,
             "phone": customer.phone,
             "email": customer.email,
-            "assigned_rep": {
-                "id": assigned_rep.id,
-                "name": assigned_rep.name,
-                "phone": assigned_rep.phone,
-            } if assigned_rep else None,
+            "category": customer.category,
+            "assigned_reps": assigned_reps,
             "referral_code_used": customer.referral_code_used,
             "has_location": customer.latitude is not None,
         }
@@ -407,7 +446,7 @@ class CustomerSignupView(APIView):
                 "customer": customer_data,
                 "tokens": tokens,
             },
-            message="تم إنشاء الحساب بنجاح",
+            message="تم إنشاء الحساب بنجاح" if not existing_customer else "تم إكمال التسجيل بنجاح",
             status_code=status.HTTP_201_CREATED,
         )
 
@@ -437,12 +476,20 @@ class CustomerSigninView(APIView):
         
         # Find Customer by phone
         try:
-            customer = Customer.objects.select_related("assigned_rep").get(phone=phone)
+            customer = Customer.objects.prefetch_related("assigned_reps").get(phone=phone)
         except Customer.DoesNotExist:
             return error_response(
                 message="رقم الهاتف أو كلمة المرور غير صحيحة",
                 errors={"credentials": ["بيانات الدخول غير صحيحة"]},
                 status_code=status.HTTP_401_UNAUTHORIZED,
+            )
+        
+        # Check if customer has completed signup (has password)
+        if not customer.has_completed_signup():
+            return error_response(
+                message="لم يتم إكمال التسجيل",
+                errors={"account": ["يرجى إكمال التسجيل أولاً"]},
+                status_code=status.HTTP_400_BAD_REQUEST,
             )
         
         # Verify password
@@ -464,17 +511,25 @@ class CustomerSigninView(APIView):
         # Generate JWT tokens
         tokens = generate_tokens_for_customer(customer)
         
+        # Get all assigned reps
+        assigned_reps = [
+            {
+                "id": rep.id,
+                "name": rep.name,
+                "phone": rep.phone,
+                "company_id": rep.company_id,
+            }
+            for rep in customer.assigned_reps.all()
+        ]
+        
         # Prepare response
         customer_data = {
             "id": customer.id,
             "name": customer.name,
             "phone": customer.phone,
             "email": customer.email,
-            "assigned_rep": {
-                "id": customer.assigned_rep.id,
-                "name": customer.assigned_rep.name,
-                "phone": customer.assigned_rep.phone,
-            } if customer.assigned_rep else None,
+            "category": customer.category,
+            "assigned_reps": assigned_reps,
             "referral_code_used": customer.referral_code_used,
             "has_location": customer.latitude is not None,
             "is_active": customer.is_active,

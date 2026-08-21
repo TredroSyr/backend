@@ -35,6 +35,7 @@ CORS_ALLOWED_ORIGINS = env_list(
         "http://localhost:3000,"
         "http://localhost:5173,"
         "https://tredro-dashboard.vercel.app,"
+        "https://tredro-mandoub.vercel.app,"
         "capacitor://localhost,"
         "https://localhost"
     ),

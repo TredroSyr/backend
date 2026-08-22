@@ -11,7 +11,6 @@ from apps.customers.excel_import import generate_template, parse_excel_file
 from apps.customers.models import Customer, CustomerCategory, CustomerCategoryAssignment
 from apps.customers.serializers import (
     CustomerCreateSerializer,
-    CustomerListSerializer,
     CustomerSerializer,
     CustomerUpdateSerializer,
 )

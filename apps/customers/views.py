@@ -47,9 +47,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
     
     def get_serializer_class(self):
         """Use different serializers for different actions."""
-        if self.action == "list":
-            return CustomerListSerializer
-        elif self.action == "create":
+        if self.action == "create":
             return CustomerCreateSerializer
         elif self.action in ["update", "partial_update"]:
             return CustomerUpdateSerializer

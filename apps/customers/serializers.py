@@ -83,7 +83,8 @@ class CustomerSignupSerializer(serializers.Serializer):
 
 class CustomerSerializer(serializers.ModelSerializer):
     """Full serializer for customer with assigned reps details."""
-    
+
+    assigned_reps_count = serializers.SerializerMethodField(read_only=True)
     assigned_reps_details = serializers.SerializerMethodField(read_only=True)
     category = serializers.IntegerField(write_only=True, required=False, allow_null=True, help_text="Category ID to assign for this company")
     category_details = serializers.SerializerMethodField(read_only=True)
@@ -98,6 +99,7 @@ class CustomerSerializer(serializers.ModelSerializer):
             "category",
             "category_details",
             "assigned_reps",
+            "assigned_reps_count",
             "assigned_reps_details",
             "referral_code_used",
             "latitude",
@@ -110,6 +112,10 @@ class CustomerSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             "assigned_reps": {"write_only": True},
         }
+
+    def get_assigned_reps_count(self, obj):
+        """Get count of assigned reps."""
+        return obj.assigned_reps.count()
     
     def get_assigned_reps_details(self, obj):
         """Get details of all assigned reps."""
@@ -136,41 +142,6 @@ class CustomerSerializer(serializers.ModelSerializer):
                     "is_global": category.company_id is None,
                 }
         return None
-
-
-class CustomerListSerializer(serializers.ModelSerializer):
-    """Lightweight serializer for customer list view."""
-    
-    assigned_reps_count = serializers.SerializerMethodField(read_only=True)
-    category_name = serializers.SerializerMethodField(read_only=True)
-    
-    class Meta:
-        model = Customer
-        fields = [
-            "id",
-            "name",
-            "phone",
-            "email",
-            "category_name",
-            "assigned_reps_count",
-            "referral_code_used",
-            "is_active",
-            "created_at",
-        ]
-        read_only_fields = fields
-    
-    def get_assigned_reps_count(self, obj):
-        """Get count of assigned reps."""
-        return obj.assigned_reps.count()
-    
-    def get_category_name(self, obj):
-        """Get category name for the current company context."""
-        company_id = self.context.get("company_id")
-        if company_id:
-            category = obj.get_category_for_company(company_id)
-            return category.name if category else None
-        return None
-
 
 class CustomerCreateSerializer(serializers.ModelSerializer):
     """Serializer for company creating a customer manually (no password)."""

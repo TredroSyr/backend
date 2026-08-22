@@ -6,7 +6,7 @@ from django.contrib.auth.hashers import make_password
 from rest_framework import serializers
 
 from apps.authentication.utils import normalize_phone, validate_phone
-from apps.customers.models import Customer
+from apps.customers.models import Customer, CustomerCategory
 from apps.reps.models import Rep
 
 
@@ -17,12 +17,6 @@ class CustomerSignupSerializer(serializers.Serializer):
     phone = serializers.CharField(max_length=32, required=True)
     password = serializers.CharField(min_length=6, write_only=True, required=True)
     email = serializers.EmailField(required=False, allow_blank=True)
-    category = serializers.CharField(
-        max_length=100,
-        required=False,
-        allow_blank=True,
-        help_text="Customer category (optional)"
-    )
     referral_code = serializers.CharField(
         max_length=32, 
         required=False, 
@@ -91,6 +85,8 @@ class CustomerSerializer(serializers.ModelSerializer):
     """Full serializer for customer with assigned reps details."""
     
     assigned_reps_details = serializers.SerializerMethodField(read_only=True)
+    category = serializers.IntegerField(write_only=True, required=False, allow_null=True, help_text="Category ID to assign for this company")
+    category_details = serializers.SerializerMethodField(read_only=True)
     
     class Meta:
         model = Customer
@@ -100,6 +96,7 @@ class CustomerSerializer(serializers.ModelSerializer):
             "phone",
             "email",
             "category",
+            "category_details",
             "assigned_reps",
             "assigned_reps_details",
             "referral_code_used",
@@ -126,12 +123,26 @@ class CustomerSerializer(serializers.ModelSerializer):
             }
             for rep in obj.assigned_reps.select_related('company').all()
         ]
+    
+    def get_category_details(self, obj):
+        """Get category details for the current company context."""
+        company_id = self.context.get("company_id")
+        if company_id:
+            category = obj.get_category_for_company(company_id)
+            if category:
+                return {
+                    "id": category.id,
+                    "name": category.name,
+                    "is_global": category.company_id is None,
+                }
+        return None
 
 
 class CustomerListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for customer list view."""
     
     assigned_reps_count = serializers.SerializerMethodField(read_only=True)
+    category_name = serializers.SerializerMethodField(read_only=True)
     
     class Meta:
         model = Customer
@@ -140,7 +151,7 @@ class CustomerListSerializer(serializers.ModelSerializer):
             "name",
             "phone",
             "email",
-            "category",
+            "category_name",
             "assigned_reps_count",
             "referral_code_used",
             "is_active",
@@ -151,6 +162,14 @@ class CustomerListSerializer(serializers.ModelSerializer):
     def get_assigned_reps_count(self, obj):
         """Get count of assigned reps."""
         return obj.assigned_reps.count()
+    
+    def get_category_name(self, obj):
+        """Get category name for the current company context."""
+        company_id = self.context.get("company_id")
+        if company_id:
+            category = obj.get_category_for_company(company_id)
+            return category.name if category else None
+        return None
 
 
 class CustomerCreateSerializer(serializers.ModelSerializer):
@@ -162,6 +181,11 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
         required=False,
         allow_empty=True,
         help_text="List of rep IDs to assign to this customer"
+    )
+    category = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        help_text="Category ID to assign for this company"
     )
     
     class Meta:
@@ -196,6 +220,26 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
         
         return normalized
     
+    def validate_category(self, value):
+        """Validate category exists and is available to this company."""
+        if value:
+            company_id = self.context.get("company_id")
+            if not company_id:
+                raise serializers.ValidationError("معلومات الشركة غير موجودة")
+            
+            from django.db.models import Q
+            # Check category is either global or belongs to this company
+            category_exists = CustomerCategory.objects.filter(
+                Q(company__isnull=True) | Q(company_id=company_id),
+                id=value,
+                is_active=True
+            ).exists()
+            
+            if not category_exists:
+                raise serializers.ValidationError("التصنيف غير موجود أو غير متاح")
+        
+        return value
+    
     def validate_assigned_reps(self, value):
         """Validate reps belong to the company and are active."""
         if value:
@@ -213,12 +257,19 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
         return value
     
     def create(self, validated_data):
-        """Create customer without password (company created)."""
+        """Create customer and assign category for this company."""
         assigned_reps = validated_data.pop('assigned_reps', [])
+        category_id = validated_data.pop('category', None)
+        company_id = self.context.get("company_id")
+        
         customer = Customer.objects.create(**validated_data)
         
         if assigned_reps:
             customer.assigned_reps.set(assigned_reps)
+        
+        # Assign category for this company
+        if category_id and company_id:
+            customer.set_category_for_company(company_id, category_id)
         
         return customer
 
@@ -232,6 +283,11 @@ class CustomerUpdateSerializer(serializers.ModelSerializer):
         required=False,
         allow_empty=True,
         help_text="List of rep IDs to assign to this customer"
+    )
+    category = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        help_text="Category ID to assign for this company"
     )
     
     class Meta:
@@ -266,6 +322,26 @@ class CustomerUpdateSerializer(serializers.ModelSerializer):
         
         return normalized
     
+    def validate_category(self, value):
+        """Validate category exists and is available to this company."""
+        if value:
+            company_id = self.context.get("company_id")
+            if not company_id:
+                raise serializers.ValidationError("معلومات الشركة غير موجودة")
+            
+            from django.db.models import Q
+            # Check category is either global or belongs to this company
+            category_exists = CustomerCategory.objects.filter(
+                Q(company__isnull=True) | Q(company_id=company_id),
+                id=value,
+                is_active=True
+            ).exists()
+            
+            if not category_exists:
+                raise serializers.ValidationError("التصنيف غير موجود أو غير متاح")
+        
+        return value
+    
     def validate_assigned_reps(self, value):
         """Validate reps belong to the company and are active."""
         if value:
@@ -283,8 +359,10 @@ class CustomerUpdateSerializer(serializers.ModelSerializer):
         return value
     
     def update(self, instance, validated_data):
-        """Update customer, handling M2M relationship."""
+        """Update customer, handling M2M relationship and category assignment."""
         assigned_reps = validated_data.pop('assigned_reps', None)
+        category_id = validated_data.pop('category', None)
+        company_id = self.context.get("company_id")
         
         # Update regular fields
         for attr, value in validated_data.items():
@@ -294,6 +372,14 @@ class CustomerUpdateSerializer(serializers.ModelSerializer):
         # Update M2M relationship if provided
         if assigned_reps is not None:
             instance.assigned_reps.set(assigned_reps)
+        
+        # Update category assignment for this company
+        if company_id:
+            if category_id:
+                instance.set_category_for_company(company_id, category_id)
+            elif category_id is None and 'category' in self.initial_data:
+                # Explicitly set to null, remove assignment
+                instance.remove_category_for_company(company_id)
         
         return instance
 
@@ -316,12 +402,6 @@ class CustomerImportSerializer(serializers.Serializer):
     name = serializers.CharField(max_length=255, required=True, allow_blank=False)
     phone = serializers.CharField(max_length=32, required=True, allow_blank=False)
     email = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
-    category = serializers.CharField(
-        max_length=100,
-        required=False,
-        allow_blank=True,
-        allow_null=True
-    )
     assigned_rep_codes = serializers.CharField(
         required=False,
         allow_blank=True,

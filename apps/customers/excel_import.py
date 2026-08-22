@@ -19,10 +19,7 @@ TEMPLATE_HEADERS = [
     "name",
     "phone",
     "email",
-    "category",
     "assigned_rep_codes",
-    "latitude",
-    "longitude",
 ]
 
 # Arabic labels for template
@@ -30,10 +27,7 @@ TEMPLATE_LABELS = {
     "name": "الاسم *",
     "phone": "رقم الهاتف *",
     "email": "البريد الإلكتروني",
-    "category": "التصنيف",
     "assigned_rep_codes": "أكواد المندوبين (مفصولة بفاصلة)",
-    "latitude": "خط العرض",
-    "longitude": "خط الطول",
 }
 
 # Sample data for template
@@ -42,19 +36,13 @@ SAMPLE_DATA = [
         "name": "أحمد محمود",
         "phone": "+963991234567",
         "email": "ahmad@example.com",
-        "category": "تاجر جملة",
         "assigned_rep_codes": "REP001,REP002",
-        "latitude": "33.513050",
-        "longitude": "36.276950",
     },
     {
         "name": "فاطمة علي",
         "phone": "+963992345678",
         "email": "",
-        "category": "عادي",
         "assigned_rep_codes": "REP001",
-        "latitude": "",
-        "longitude": "",
     },
 ]
 
@@ -102,13 +90,13 @@ def generate_template() -> BytesIO:
     notes_ws.append([])
     notes_ws.append(["2. الحقول الاختيارية:"])
     notes_ws.append(["   - البريد الإلكتروني"])
-    notes_ws.append(["   - التصنيف"])
     notes_ws.append(["   - أكواد المندوبين (مفصولة بفاصلة مثل: REP001,REP002)"])
-    notes_ws.append(["   - خط العرض وخط الطول (يجب ملؤهما معاً أو تركهما فارغين)"])
     notes_ws.append([])
-    notes_ws.append(["3. قم بحذف الصفوف النموذجية وأضف بياناتك الخاصة"])
-    notes_ws.append(["4. لا تقم بتغيير عناوين الأعمدة في السطر الأول"])
-    notes_ws.append(["5. يمكنك إضافة عدد غير محدود من الصفوف"])
+    notes_ws.append(["3. ملاحظات:"])
+    notes_ws.append(["   - التصنيف والموقع سيتم تحديدهما يدوياً لاحقاً"])
+    notes_ws.append(["   - قم بحذف الصفوف النموذجية وأضف بياناتك الخاصة"])
+    notes_ws.append(["   - لا تقم بتغيير عناوين الأعمدة في السطر الأول"])
+    notes_ws.append(["   - يمكنك إضافة عدد غير محدود من الصفوف"])
     
     notes_ws.column_dimensions['A'].width = 80
     

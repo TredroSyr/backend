@@ -348,8 +348,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 # All failed
                 return error_response(
                     message=f"فشل استيراد جميع الصفوف ({results['failed']} صف)",
-                    errors={"import": ["جميع الصفوف فشلت في التحقق"]},
-                    data=results,
+                    errors={"import": ["جميع الصفوف فشلت في التحقق"], "details": results},
                     status_code=status.HTTP_400_BAD_REQUEST,
                 )
             elif results["successful"] > 0 and results["failed"] == 0:

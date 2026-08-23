@@ -123,7 +123,12 @@ class CustomerViewSet(viewsets.ModelViewSet):
         """Full or partial update of customer details."""
         partial = kwargs.pop("partial", False)
         instance = self.get_object()
-        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        
+        # Add customer to context for validation
+        context = self.get_serializer_context()
+        context['customer'] = instance
+        
+        serializer = self.get_serializer(instance, data=request.data, partial=partial, context=context)
         
         if not serializer.is_valid():
             return error_response(
@@ -135,7 +140,7 @@ class CustomerViewSet(viewsets.ModelViewSet):
         customer = serializer.save()
         
         return success_response(
-            data={"customer": CustomerSerializer(customer).data},
+            data={"customer": CustomerSerializer(customer, context=self.get_serializer_context()).data},
             message="تم تحديث بيانات العميل بنجاح",
             status_code=status.HTTP_200_OK,
         )

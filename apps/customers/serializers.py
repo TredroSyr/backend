@@ -98,7 +98,6 @@ class CustomerSerializer(serializers.ModelSerializer):
             "email",
             "category",
             "category_details",
-            "assigned_reps",
             "assigned_reps_count",
             "assigned_reps_details",
             "referral_code_used",
@@ -109,9 +108,6 @@ class CustomerSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["id", "referral_code_used", "created_at", "updated_at"]
-        extra_kwargs = {
-            "assigned_reps": {"write_only": True},
-        }
 
     def get_assigned_reps_count(self, obj):
         """Get count of assigned reps."""
@@ -159,34 +155,36 @@ class CustomerSerializer(serializers.ModelSerializer):
                 }
         return None
 
-class CustomerCreateSerializer(serializers.ModelSerializer):
+class CustomerCreateSerializer(serializers.Serializer):
     """Serializer for company creating a customer manually (no password)."""
     
-    assigned_reps = serializers.PrimaryKeyRelatedField(
-        queryset=Rep.objects.filter(is_active=True),
-        many=True,
-        required=False,
-        allow_empty=True,
-        help_text="List of rep IDs to assign to this customer"
-    )
+    name = serializers.CharField(max_length=255, required=True)
+    phone = serializers.CharField(max_length=32, required=True)
+    email = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
     category = serializers.IntegerField(
         required=False,
         allow_null=True,
         help_text="Category ID to assign for this company"
     )
-    
-    class Meta:
-        model = Customer
-        fields = [
-            "name",
-            "phone",
-            "email",
-            "category",
-            "assigned_reps",
-            "latitude",
-            "longitude",
-            "is_active",
-        ]
+    assigned_rep_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=False,
+        allow_empty=True,
+        help_text="List of rep IDs to assign to this customer (with empty work_days)"
+    )
+    latitude = serializers.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        required=False,
+        allow_null=True
+    )
+    longitude = serializers.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        required=False,
+        allow_null=True
+    )
+    is_active = serializers.BooleanField(default=True, required=False)
     
     def validate_phone(self, value: str) -> str:
         """Validate and normalize phone number."""
@@ -197,12 +195,8 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
                 "رقم الهاتف غير صحيح. الصيغة المطلوبة: +963XXXXXXXXX"
             )
         
-        # Check uniqueness, excluding current instance on update
-        queryset = Customer.objects.filter(phone=normalized)
-        if self.instance:
-            queryset = queryset.exclude(id=self.instance.id)
-        
-        if queryset.exists():
+        # Check uniqueness
+        if Customer.objects.filter(phone=normalized).exists():
             raise serializers.ValidationError("رقم الهاتف مستخدم من قبل")
         
         return normalized
@@ -227,7 +221,7 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
         
         return value
     
-    def validate_assigned_reps(self, value):
+    def validate_assigned_rep_ids(self, value):
         """Validate reps belong to the company and are active."""
         if value:
             company_id = self.context.get("company_id")
@@ -235,24 +229,32 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
             if not company_id:
                 raise serializers.ValidationError("معلومات الشركة غير موجودة")
             
-            # Filter to only reps from this company
-            company_reps = [rep for rep in value if rep.company_id == company_id]
+            # Check all reps exist and belong to company
+            reps = Rep.objects.filter(id__in=value, company_id=company_id, is_active=True)
             
-            if len(company_reps) != len(value):
-                raise serializers.ValidationError("بعض المندوبين لا ينتمون لهذه الشركة")
+            if reps.count() != len(value):
+                raise serializers.ValidationError("بعض المندوبين لا ينتمون لهذه الشركة أو غير نشطين")
         
         return value
     
     def create(self, validated_data):
-        """Create customer and assign category for this company."""
-        assigned_reps = validated_data.pop('assigned_reps', [])
+        """Create customer and assign reps with category."""
+        from apps.reps.models import RepCustomerAssignment
+        
+        assigned_rep_ids = validated_data.pop('assigned_rep_ids', [])
         category_id = validated_data.pop('category', None)
         company_id = self.context.get("company_id")
         
         customer = Customer.objects.create(**validated_data)
         
-        if assigned_reps:
-            customer.assigned_reps.set(assigned_reps)
+        # Create rep assignments with empty work_days (will use rep's default)
+        if assigned_rep_ids:
+            for rep_id in assigned_rep_ids:
+                RepCustomerAssignment.objects.create(
+                    rep_id=rep_id,
+                    customer=customer,
+                    work_days=[]
+                )
         
         # Assign category for this company
         if category_id and company_id:
@@ -261,34 +263,36 @@ class CustomerCreateSerializer(serializers.ModelSerializer):
         return customer
 
 
-class CustomerUpdateSerializer(serializers.ModelSerializer):
+class CustomerUpdateSerializer(serializers.Serializer):
     """Serializer for updating customer (password cannot be changed by company)."""
     
-    assigned_reps = serializers.PrimaryKeyRelatedField(
-        queryset=Rep.objects.filter(is_active=True),
-        many=True,
-        required=False,
-        allow_empty=True,
-        help_text="List of rep IDs to assign to this customer"
-    )
+    name = serializers.CharField(max_length=255, required=False)
+    phone = serializers.CharField(max_length=32, required=False)
+    email = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
     category = serializers.IntegerField(
         required=False,
         allow_null=True,
         help_text="Category ID to assign for this company"
     )
-    
-    class Meta:
-        model = Customer
-        fields = [
-            "name",
-            "phone",
-            "email",
-            "category",
-            "assigned_reps",
-            "latitude",
-            "longitude",
-            "is_active",
-        ]
+    assigned_rep_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=False,
+        allow_empty=True,
+        help_text="List of rep IDs to assign to this customer (replaces existing assignments)"
+    )
+    latitude = serializers.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        required=False,
+        allow_null=True
+    )
+    longitude = serializers.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        required=False,
+        allow_null=True
+    )
+    is_active = serializers.BooleanField(required=False)
     
     def validate_phone(self, value: str) -> str:
         """Validate and normalize phone number."""
@@ -300,9 +304,10 @@ class CustomerUpdateSerializer(serializers.ModelSerializer):
             )
         
         # Check uniqueness, excluding current instance
+        customer = self.context.get('customer')
         queryset = Customer.objects.filter(phone=normalized)
-        if self.instance:
-            queryset = queryset.exclude(id=self.instance.id)
+        if customer:
+            queryset = queryset.exclude(id=customer.id)
         
         if queryset.exists():
             raise serializers.ValidationError("رقم الهاتف مستخدم من قبل")
@@ -329,7 +334,7 @@ class CustomerUpdateSerializer(serializers.ModelSerializer):
         
         return value
     
-    def validate_assigned_reps(self, value):
+    def validate_assigned_rep_ids(self, value):
         """Validate reps belong to the company and are active."""
         if value:
             company_id = self.context.get("company_id")
@@ -337,28 +342,44 @@ class CustomerUpdateSerializer(serializers.ModelSerializer):
             if not company_id:
                 raise serializers.ValidationError("معلومات الشركة غير موجودة")
             
-            # Filter to only reps from this company
-            company_reps = [rep for rep in value if rep.company_id == company_id]
+            # Check all reps exist and belong to company
+            reps = Rep.objects.filter(id__in=value, company_id=company_id, is_active=True)
             
-            if len(company_reps) != len(value):
-                raise serializers.ValidationError("بعض المندوبين لا ينتمون لهذه الشركة")
+            if reps.count() != len(value):
+                raise serializers.ValidationError("بعض المندوبين لا ينتمون لهذه الشركة أو غير نشطين")
         
         return value
     
     def update(self, instance, validated_data):
-        """Update customer, handling M2M relationship and category assignment."""
-        assigned_reps = validated_data.pop('assigned_reps', None)
+        """Update customer, handling rep assignments and category."""
+        from apps.reps.models import RepCustomerAssignment
+        
+        assigned_rep_ids = validated_data.pop('assigned_rep_ids', None)
         category_id = validated_data.pop('category', None)
         company_id = self.context.get("company_id")
         
         # Update regular fields
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
-        instance.save()
         
-        # Update M2M relationship if provided
-        if assigned_reps is not None:
-            instance.assigned_reps.set(assigned_reps)
+        if validated_data:
+            instance.save()
+        
+        # Update rep assignments if provided (replaces existing from this company)
+        if assigned_rep_ids is not None and company_id:
+            # Remove existing assignments from this company
+            RepCustomerAssignment.objects.filter(
+                customer=instance,
+                rep__company_id=company_id
+            ).delete()
+            
+            # Create new assignments with empty work_days
+            for rep_id in assigned_rep_ids:
+                RepCustomerAssignment.objects.create(
+                    rep_id=rep_id,
+                    customer=instance,
+                    work_days=[]
+                )
         
         # Update category assignment for this company
         if company_id:

@@ -118,17 +118,33 @@ class CustomerSerializer(serializers.ModelSerializer):
         return obj.assigned_reps.count()
     
     def get_assigned_reps_details(self, obj):
-        """Get details of all assigned reps."""
-        return [
-            {
+        """Get details of all assigned reps with work days."""
+        from apps.reps.models import RepCustomerAssignment
+        
+        reps = obj.assigned_reps.select_related('company').all()
+        result = []
+        
+        for rep in reps:
+            # Get assignment work days
+            try:
+                assignment = RepCustomerAssignment.objects.get(
+                    rep_id=rep.id,
+                    customer_id=obj.id
+                )
+                effective_work_days = assignment.get_effective_work_days()
+            except RepCustomerAssignment.DoesNotExist:
+                effective_work_days = rep.work_days
+            
+            result.append({
                 "id": rep.id,
                 "name": rep.name,
                 "phone": rep.phone,
                 "company_id": rep.company_id,
                 "referral_code": rep.referral_code,
-            }
-            for rep in obj.assigned_reps.select_related('company').all()
-        ]
+                "work_days": effective_work_days,
+            })
+        
+        return result
     
     def get_category_details(self, obj):
         """Get category details for the current company context."""

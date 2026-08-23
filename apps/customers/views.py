@@ -159,28 +159,78 @@ class CustomerViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="assign-reps")
     def assign_reps(self, request, pk=None):
         """
-        Assign customer to one or more reps from the authenticated company.
+        Assign customer to one or more reps from the authenticated company with work days.
         
         POST /api/companies/customers/{id}/assign-reps
         {
-            "rep_ids": [123, 456]
+            "assignments": [
+                {
+                    "rep_id": 123,
+                    "work_days": ["sunday", "monday", "tuesday"]  // optional, defaults to rep's work_days
+                },
+                {
+                    "rep_id": 456,
+                    "work_days": []  // empty means use rep's default
+                }
+            ]
+        }
+        
+        OR legacy format (backward compatible):
+        {
+            "rep_ids": [123, 456]  // assigns with empty work_days (will use rep's default)
         }
         """
-        customer = self.get_object()
-        rep_ids = request.data.get("rep_ids", [])
+        from apps.reps.models import Rep, RepCustomerAssignment
+        from apps.reps.serializers import RepCustomerAssignmentSerializer
         
-        if not rep_ids or not isinstance(rep_ids, list):
+        customer = self.get_object()
+        company_id = getattr(request, "company_id", None)
+        
+        # Support both new and legacy formats
+        assignments_data = request.data.get("assignments")
+        legacy_rep_ids = request.data.get("rep_ids")
+        
+        if not assignments_data and not legacy_rep_ids:
             return error_response(
-                message="قائمة معرفات المندوبين مطلوبة",
-                errors={"rep_ids": ["يجب تقديم قائمة من معرفات المندوبين"]},
+                message="بيانات التعيين مطلوبة",
+                errors={"assignments": ["يجب تقديم قائمة التعيينات أو معرفات المندوبين"]},
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
         
+        # Convert legacy format to new format
+        if legacy_rep_ids and not assignments_data:
+            if not isinstance(legacy_rep_ids, list):
+                return error_response(
+                    message="قائمة معرفات المندوبين يجب أن تكون قائمة",
+                    errors={"rep_ids": ["يجب أن تكون قائمة"]},
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                )
+            assignments_data = [{"rep_id": rep_id, "work_days": []} for rep_id in legacy_rep_ids]
+        
+        # Validate assignments format
+        if not isinstance(assignments_data, list):
+            return error_response(
+                message="قائمة التعيينات يجب أن تكون قائمة",
+                errors={"assignments": ["يجب أن تكون قائمة"]},
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        # Validate each assignment
+        validated_assignments = []
+        for assignment_data in assignments_data:
+            serializer = RepCustomerAssignmentSerializer(data=assignment_data)
+            if not serializer.is_valid():
+                return error_response(
+                    message="بيانات التعيين غير صالحة",
+                    errors=serializer.errors,
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                )
+            validated_assignments.append(serializer.validated_data)
+        
+        # Extract rep IDs
+        rep_ids = [a["rep_id"] for a in validated_assignments]
+        
         # Validate reps belong to company and are active
-        from apps.reps.models import Rep
-        
-        company_id = getattr(request, "company_id", None)
-        
         reps = Rep.objects.filter(
             id__in=rep_ids,
             company_id=company_id,
@@ -194,11 +244,19 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 status_code=status.HTTP_404_NOT_FOUND,
             )
         
-        # Add reps to customer (doesn't remove existing)
-        customer.assigned_reps.add(*reps)
+        # Create or update assignments with work_days
+        for assignment in validated_assignments:
+            rep_id = assignment["rep_id"]
+            work_days = assignment.get("work_days", [])
+            
+            RepCustomerAssignment.objects.update_or_create(
+                rep_id=rep_id,
+                customer=customer,
+                defaults={"work_days": work_days}
+            )
         
         return success_response(
-            data={"customer": CustomerSerializer(customer).data},
+            data={"customer": CustomerSerializer(customer, context={"company_id": company_id}).data},
             message="تم تعيين المندوبين للعميل بنجاح",
             status_code=status.HTTP_200_OK,
         )
@@ -213,6 +271,8 @@ class CustomerViewSet(viewsets.ModelViewSet):
             "rep_ids": [123, 456]  // optional, removes all company reps if not provided
         }
         """
+        from apps.reps.models import Rep, RepCustomerAssignment
+        
         customer = self.get_object()
         rep_ids = request.data.get("rep_ids")
         
@@ -227,19 +287,21 @@ class CustomerViewSet(viewsets.ModelViewSet):
                     status_code=status.HTTP_400_BAD_REQUEST,
                 )
             
-            from apps.reps.models import Rep
-            reps = Rep.objects.filter(
-                id__in=rep_ids,
-                company_id=company_id
-            )
-            customer.assigned_reps.remove(*reps)
+            # Delete assignment records
+            RepCustomerAssignment.objects.filter(
+                rep_id__in=rep_ids,
+                rep__company_id=company_id,
+                customer=customer
+            ).delete()
         else:
             # Remove all reps from this company
-            company_reps = customer.assigned_reps.filter(company_id=company_id)
-            customer.assigned_reps.remove(*company_reps)
+            RepCustomerAssignment.objects.filter(
+                rep__company_id=company_id,
+                customer=customer
+            ).delete()
         
         return success_response(
-            data={"customer": CustomerSerializer(customer).data},
+            data={"customer": CustomerSerializer(customer, context={"company_id": company_id}).data},
             message="تم إزالة تعيين المندوبين بنجاح",
             status_code=status.HTTP_200_OK,
         )
@@ -360,8 +422,12 @@ class CustomerViewSet(viewsets.ModelViewSet):
             )
     
     def _bulk_assign_rep(self, request, customers, company_id):
-        """Assign a rep to multiple customers."""
+        """Assign a rep to multiple customers with optional work days."""
+        from apps.reps.models import Rep, RepCustomerAssignment
+        from apps.reps.serializers import RepCustomerAssignmentSerializer
+        
         rep_id = request.data.get("rep_id")
+        work_days = request.data.get("work_days", [])
         
         if not rep_id:
             return error_response(
@@ -370,9 +436,18 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
         
-        # Validate rep exists and belongs to company
-        from apps.reps.models import Rep
+        # Validate work_days if provided
+        if work_days:
+            serializer = RepCustomerAssignmentSerializer(data={"rep_id": rep_id, "work_days": work_days})
+            if not serializer.is_valid():
+                return error_response(
+                    message="أيام العمل غير صالحة",
+                    errors=serializer.errors,
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                )
+            work_days = serializer.validated_data.get("work_days", [])
         
+        # Validate rep exists and belongs to company
         try:
             rep = Rep.objects.get(id=rep_id, company_id=company_id, is_active=True)
         except Rep.DoesNotExist:
@@ -382,14 +457,18 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 status_code=status.HTTP_404_NOT_FOUND,
             )
         
-        # Assign rep to all customers
+        # Assign rep to all customers with work_days
         successful = 0
         failed = 0
         failed_ids = []
         
         for customer in customers:
             try:
-                customer.assigned_reps.add(rep)
+                RepCustomerAssignment.objects.update_or_create(
+                    rep=rep,
+                    customer=customer,
+                    defaults={"work_days": work_days}
+                )
                 successful += 1
             except Exception:
                 failed += 1
@@ -459,6 +538,8 @@ class CustomerViewSet(viewsets.ModelViewSet):
     
     def _bulk_remove_rep(self, request, customers, company_id):
         """Remove a rep from multiple customers."""
+        from apps.reps.models import Rep, RepCustomerAssignment
+        
         rep_id = request.data.get("rep_id")
         
         if not rep_id:
@@ -469,8 +550,6 @@ class CustomerViewSet(viewsets.ModelViewSet):
             )
         
         # Validate rep exists and belongs to company
-        from apps.reps.models import Rep
-        
         try:
             rep = Rep.objects.get(id=rep_id, company_id=company_id)
         except Rep.DoesNotExist:
@@ -480,26 +559,20 @@ class CustomerViewSet(viewsets.ModelViewSet):
                 status_code=status.HTTP_404_NOT_FOUND,
             )
         
-        # Remove rep from all customers
-        successful = 0
-        failed = 0
-        failed_ids = []
-        
-        for customer in customers:
-            try:
-                customer.assigned_reps.remove(rep)
-                successful += 1
-            except Exception:
-                failed += 1
-                failed_ids.append(customer.id)
+        # Remove rep assignments from all customers
+        customer_ids = [c.id for c in customers]
+        deleted_count = RepCustomerAssignment.objects.filter(
+            rep=rep,
+            customer_id__in=customer_ids
+        ).delete()[0]
         
         return success_response(
-            message=f"تم إزالة المندوب من {successful} عميل بنجاح",
+            message=f"تم إزالة المندوب من {deleted_count} عميل بنجاح",
             data={
                 "total": len(customers),
-                "successful": successful,
-                "failed": failed,
-                "failed_ids": failed_ids,
+                "successful": deleted_count,
+                "failed": len(customers) - deleted_count,
+                "failed_ids": [],
             },
             status_code=status.HTTP_200_OK,
         )

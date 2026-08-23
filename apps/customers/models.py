@@ -96,8 +96,8 @@ class Customer(models.Model):
     themselves. If created manually first, they can complete signup later by setting
     password without conflict.
     
-    assigned_reps is a many-to-many relationship allowing customer to be assigned
-    to multiple reps from different companies.
+    assigned_reps uses RepCustomerAssignment through table to allow per-assignment
+    metadata like work_days.
     
     referral_code_used tracks the original referral code used during signup for
     attribution/analytics, separate from assigned_reps which can be changed by admin.
@@ -116,6 +116,7 @@ class Customer(models.Model):
     )
     assigned_reps = models.ManyToManyField(
         "reps.Rep",
+        through="reps.RepCustomerAssignment",
         related_name="assigned_customers",
         blank=True,
         help_text="Reps from any company can be assigned to this customer"

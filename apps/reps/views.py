@@ -22,11 +22,13 @@ class RepCustomerViewSet(viewsets.ModelViewSet):
     Reps can:
     - List customers assigned to them
     - View customer details
+    - Create new customers (automatically assigned to them)
     - Update customer location and work days
     - Filter by active status
     
     Endpoints:
     - GET /api/reps/customers - List assigned customers
+    - POST /api/reps/customers - Create a new customer
     - GET /api/reps/customers/{id} - Get customer details
     - PATCH /api/reps/customers/{id} - Update customer location and work days
     - GET /api/reps/customers/stats - Get customer statistics
@@ -34,7 +36,7 @@ class RepCustomerViewSet(viewsets.ModelViewSet):
     
     permission_classes = [IsAuthenticated, IsRep]
     serializer_class = CustomerSerializer
-    http_method_names = ['get', 'patch', 'head', 'options']
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
     
     def get_queryset(self):
         """Return customers assigned to the authenticated rep."""
@@ -74,6 +76,93 @@ class RepCustomerViewSet(viewsets.ModelViewSet):
                 "total": queryset.count()
             },
             status_code=status.HTTP_200_OK,
+        )
+    
+    def create(self, request, *args, **kwargs):
+        """
+        Create a new customer for the rep's company and auto-assign to this rep.
+        
+        POST /api/reps/customers/
+        {
+            "name": "أحمد محمد",
+            "phone": "+963991234567",
+            "email": "ahmed@example.com",  // optional
+            "latitude": 33.513805,  // optional
+            "longitude": 36.276527,  // optional
+            "work_days": ["sunday", "monday", "tuesday"]  // optional, defaults to rep's work_days
+        }
+        """
+        from apps.customers.serializers import CustomerCreateSerializer
+        from apps.reps.models import Rep, RepCustomerAssignment
+        
+        # Get rep and company info from token
+        token_payload = getattr(request, "token_payload", {})
+        rep_id = token_payload.get("rep_id")
+        company_id = token_payload.get("company_id")
+        
+        if not rep_id or not company_id:
+            return error_response(
+                message="معلومات المندوب أو الشركة غير موجودة",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        # Verify rep exists and is active
+        try:
+            rep = Rep.objects.get(id=rep_id, company_id=company_id, is_active=True)
+        except Rep.DoesNotExist:
+            return error_response(
+                message="المندوب غير موجود أو غير نشط",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        
+        # Extract work_days from request (optional)
+        work_days = request.data.get("work_days", [])
+        
+        # Validate work_days if provided
+        if work_days:
+            serializer_validator = CustomerLocationWorkDaysUpdateSerializer(data={"work_days": work_days})
+            if not serializer_validator.is_valid():
+                return error_response(
+                    message="أيام العمل غير صالحة",
+                    errors=serializer_validator.errors,
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                )
+            work_days = serializer_validator.validated_data["work_days"]
+        
+        # Prepare customer data (remove work_days as it's not part of Customer model)
+        customer_data = {k: v for k, v in request.data.items() if k != "work_days"}
+        
+        # Use the company's CustomerCreateSerializer for validation
+        serializer = CustomerCreateSerializer(
+            data=customer_data,
+            context={"company_id": company_id}
+        )
+        
+        if not serializer.is_valid():
+            return error_response(
+                message="بيانات غير صالحة",
+                errors=serializer.errors,
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        # Create customer (without assigned_rep_ids to handle manually)
+        validated_data = serializer.validated_data.copy()
+        validated_data.pop('assigned_rep_ids', None)
+        validated_data.pop('category', None)  # Reps can't assign categories
+        
+        customer = Customer.objects.create(**validated_data)
+        
+        # Automatically assign to this rep with specified work_days
+        RepCustomerAssignment.objects.create(
+            rep=rep,
+            customer=customer,
+            work_days=work_days
+        )
+        
+        return success_response(
+            data={"customer": CustomerSerializer(customer).data},
+            message="تم إضافة العميل بنجاح وتعيينه لك",
+            status_code=status.HTTP_201_CREATED,
         )
     
     def retrieve(self, request, *args, **kwargs):

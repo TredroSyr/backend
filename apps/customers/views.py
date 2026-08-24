@@ -32,6 +32,11 @@ class CustomerViewSet(viewsets.ModelViewSet):
     
     Endpoints:
     - GET /api/companies/customers - List all customers
+      Query params:
+        - is_active: true/false - Filter by active status
+        - my_company_only: true - Filter customers assigned to any rep from this company
+        - rep_id: int - Filter customers assigned to a specific rep
+        - category_id: int - Filter customers by category
     - POST /api/companies/customers - Create a new customer
     - GET /api/companies/customers/{id} - Get customer details
     - PATCH /api/companies/customers/{id} - Update customer
@@ -71,6 +76,27 @@ class CustomerViewSet(viewsets.ModelViewSet):
         company_id = getattr(request, "company_id", None)
         if company_id and request.query_params.get("my_company_only") == "true":
             queryset = queryset.filter(assigned_reps__company_id=company_id).distinct()
+        
+        # Optional filter by specific rep ID
+        rep_id = request.query_params.get("rep_id")
+        if rep_id and company_id:
+            from apps.reps.models import Rep
+            
+            # Validate that the rep belongs to the company
+            rep_exists = Rep.objects.filter(
+                id=rep_id,
+                company_id=company_id
+            ).exists()
+            
+            if not rep_exists:
+                return error_response(
+                    message="المندوب غير موجود في هذه الشركة",
+                    errors={"rep_id": ["المندوب غير موجود أو لا ينتمي لهذه الشركة"]},
+                    status_code=status.HTTP_404_NOT_FOUND,
+                )
+            
+            # Filter customers assigned to this specific rep
+            queryset = queryset.filter(assigned_reps__id=rep_id).distinct()
         
         # Optional filter by category (for current company)
         category_id = request.query_params.get("category_id")

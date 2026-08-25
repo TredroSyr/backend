@@ -30,5 +30,5 @@ USER appuser
 
 EXPOSE 8000
 
-ENTRYPOINT ["python", "/app/docker/wait_for_db.py"]
+ENTRYPOINT ["python", "/app/docker/backend/wait_for_db.py"]
 CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3"]

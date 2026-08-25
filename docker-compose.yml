@@ -28,7 +28,9 @@ services:
       retries: 10
 
   backend:
-    build: .
+    build:
+      context: .
+      dockerfile: docker/backend/Dockerfile
     command: >
       sh -c "python manage.py migrate --noinput &&
              python manage.py initialize_application &&
@@ -52,7 +54,9 @@ services:
         condition: service_healthy
 
   celery:
-    build: .
+    build:
+      context: .
+      dockerfile: docker/backend/Dockerfile
     command: celery -A config worker --loglevel=info
     env_file:
       - .env
@@ -73,7 +77,9 @@ services:
         condition: service_started
 
   celery-beat:
-    build: .
+    build:
+      context: .
+      dockerfile: docker/backend/Dockerfile
     command: celery -A config beat --loglevel=info
     env_file:
       - .env
@@ -93,6 +99,24 @@ services:
       backend:
         condition: service_started
 
+  pgadmin:
+    build:
+      context: .
+      dockerfile: docker/pgadmin/Dockerfile
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@example.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+
 volumes:
   postgres_data:
   redis_data:
+  pgadmin_data:

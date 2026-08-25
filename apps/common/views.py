@@ -288,3 +288,19 @@ class ModulesView(APIView):
             data={"modules": modules},
             status_code=status.HTTP_200_OK,
         )
+
+class ApkVersionView(APIView):
+    """
+    GET /api/apk-version
+    
+    Get the latest APK version for update checking.
+    """
+    
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        """Get the latest APK version."""
+        return success_response(
+            data={"version": 3},
+            status_code=status.HTTP_200_OK,
+        )

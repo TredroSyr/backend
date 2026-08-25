@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from django.urls import path
 
-from apps.common.views import BusinessTypesView, LocationsView, ModulesView
+from apps.common.views import ApkVersionView, BusinessTypesView, LocationsView, ModulesView
 
 urlpatterns = [
     path(
@@ -21,5 +21,10 @@ urlpatterns = [
         "modules",
         ModulesView.as_view(),
         name="modules",
+    ),
+    path(
+        "apk-version",
+        ApkVersionView.as_view(),
+        name="apk-version",
     ),
 ]

@@ -245,11 +245,12 @@ class SubUserListView(APIView):
 
 class SubUserDetailView(APIView):
     """
+    GET /api/companies/subusers/<id>
     PATCH /api/companies/subusers/<id>
     DELETE /api/companies/subusers/<id>
     
-    Update or delete a sub-user.
-    Only company owner can perform these actions.
+    Get, update or delete a sub-user.
+    Only company owner can update/delete sub-users.
     Owner cannot be deleted or modified through this endpoint.
     """
     
@@ -293,6 +294,44 @@ class SubUserDetailView(APIView):
                 )
         
         return company, None
+    
+    def get(self, request, subuser_id):
+        """Get sub-user details with permissions."""
+        company_id = getattr(request, "company_id", None)
+        
+        if not company_id:
+            return error_response(
+                message="لم يتم العثور على معلومات الشركة",
+                errors={"company": ["يجب أن تكون مسجلاً كمستخدم شركة"]},
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+        
+        try:
+            company = Company.objects.get(id=company_id)
+        except Company.DoesNotExist:
+            return error_response(
+                message="الشركة غير موجودة",
+                errors={"company": ["لم يتم العثور على الشركة"]},
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        
+        # Get the sub-user
+        try:
+            sub_user = SubUser.objects.select_related("role", "company").get(
+                id=subuser_id, 
+                company=company
+            )
+        except SubUser.DoesNotExist:
+            return error_response(
+                message="المستخدم الفرعي غير موجود",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        
+        # Return sub-user data with permissions
+        return success_response(
+            data={"subuser": SubUserDetailSerializer(sub_user).data},
+            status_code=status.HTTP_200_OK,
+        )
     
     def patch(self, request, subuser_id):
         """Update sub-user details and permissions."""

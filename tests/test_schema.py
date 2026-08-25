@@ -3,8 +3,9 @@ from __future__ import annotations
 import pytest
 from django.db import IntegrityError
 
+from apps.common.models import UnitOfMeasure
 from apps.companies.models import Company
-from apps.products.models import UnitOfMeasure, Warehouse, WarehouseOwnerType
+from apps.products.models import Warehouse, WarehouseOwnerType
 from apps.reps.models import Rep
 
 

@@ -61,6 +61,7 @@ INSTALLED_APPS = [
     "rest_framework_simplejwt",
     # Note: token_blacklist removed - incompatible with custom user models
     # Local apps
+    "apps.common",
     "apps.health",
     "apps.authentication",
     "apps.companies",

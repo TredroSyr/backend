@@ -88,7 +88,7 @@ class OrderItem(models.Model):
         related_name="order_items",
     )
     unit = models.ForeignKey(
-        "products.UnitOfMeasure",
+        "common.UnitOfMeasure",
         on_delete=models.PROTECT,
         related_name="order_items",
         help_text="Snapshot of Product.unit at line creation.",

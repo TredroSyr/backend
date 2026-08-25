@@ -21,6 +21,18 @@ class Command(BaseCommand):
                 "args": [],
                 "kwargs": {},
             },
+            {
+                "name": "Seed Customer Categories",
+                "command": "seed_customer_categories",
+                "args": [],
+                "kwargs": {},
+            },
+            {
+                "name": "Seed Billing Plans",
+                "command": "seed_billing_plans",
+                "args": [],
+                "kwargs": {},
+            },
             # Add more initialization commands here in the future
             # Example:
             # {

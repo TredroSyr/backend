@@ -6,11 +6,8 @@ from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
 from apps.companies.views import (
-    CompanyBusinessTypesView,
-    CompanyLocationsView,
     CompanyOnboardingStatusView,
     CompanyOnboardingView,
-    ModuleListView,
     RepViewSet,
     SubUserCreateView,
     SubUserDetailView,
@@ -32,22 +29,6 @@ urlpatterns = [
         "companies/onboarding/status",
         CompanyOnboardingStatusView.as_view(),
         name="company-onboarding-status",
-    ),
-    # Reference data
-    path(
-        "companies/locations",
-        CompanyLocationsView.as_view(),
-        name="company-locations",
-    ),
-    path(
-        "companies/business-types",
-        CompanyBusinessTypesView.as_view(),
-        name="company-business-types",
-    ),
-    path(
-        "companies/modules",
-        ModuleListView.as_view(),
-        name="company-modules",
     ),
     # Sub-users
     path(

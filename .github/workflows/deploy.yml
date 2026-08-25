@@ -18,7 +18,7 @@ jobs:
 
       - name: Build and push
         run: |
-          docker build -t alieny/tredro-backend:latest .
+          docker build -t alieny/tredro-backend:latest -f docker/backend/Dockerfile .
           docker push alieny/tredro-backend:latest
 
       - name: Trigger Render deploy

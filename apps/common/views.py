@@ -1,12 +1,111 @@
-"""Views for common app."""
+"""Views for common lookup data (global reference tables)."""
 
 from __future__ import annotations
 
-from rest_framework import status
+from rest_framework import status, viewsets
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
+from apps.common.models import Currency, UnitOfMeasure
+from apps.common.serializers import CurrencySerializer, UnitOfMeasureSerializer
 from core.responses import success_response
+
+
+class UnitOfMeasureViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Read-only viewset for UnitOfMeasure lookup data.
+    
+    These are global predefined units that companies pick from.
+    No company scoping needed - this is reference data.
+    
+    Endpoints:
+    - GET /api/units-of-measure/ - List all active units
+    - GET /api/units-of-measure/{id}/ - Get specific unit details
+    """
+    
+    permission_classes = [IsAuthenticated]
+    serializer_class = UnitOfMeasureSerializer
+    queryset = UnitOfMeasure.objects.all()
+    
+    def get_queryset(self):
+        """Return active units, optionally all if requested."""
+        queryset = super().get_queryset()
+        
+        # Filter by is_active unless explicitly requesting all
+        show_all = self.request.query_params.get("show_all", "false").lower() == "true"
+        if not show_all:
+            queryset = queryset.filter(is_active=True)
+        
+        return queryset.order_by("name")
+    
+    def list(self, request, *args, **kwargs):
+        """List all units of measure."""
+        queryset = self.filter_queryset(self.get_queryset())
+        serializer = self.get_serializer(queryset, many=True)
+        
+        return success_response(
+            data={"units": serializer.data},
+            status_code=status.HTTP_200_OK,
+        )
+    
+    def retrieve(self, request, *args, **kwargs):
+        """Get specific unit of measure."""
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        
+        return success_response(
+            data={"unit": serializer.data},
+            status_code=status.HTTP_200_OK,
+        )
+
+
+class CurrencyViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Read-only viewset for Currency lookup data.
+    
+    These are global predefined currencies (ISO 4217) that companies pick from.
+    No company scoping needed - this is reference data.
+    
+    Endpoints:
+    - GET /api/currencies/ - List all active currencies
+    - GET /api/currencies/{id}/ - Get specific currency details
+    """
+    
+    permission_classes = [IsAuthenticated]
+    serializer_class = CurrencySerializer
+    queryset = Currency.objects.all()
+    
+    def get_queryset(self):
+        """Return active currencies, optionally all if requested."""
+        queryset = super().get_queryset()
+        
+        # Filter by is_active unless explicitly requesting all
+        show_all = self.request.query_params.get("show_all", "false").lower() == "true"
+        if not show_all:
+            queryset = queryset.filter(is_active=True)
+        
+        return queryset.order_by("code")
+    
+    def list(self, request, *args, **kwargs):
+        """List all currencies."""
+        queryset = self.filter_queryset(self.get_queryset())
+        serializer = self.get_serializer(queryset, many=True)
+        
+        return success_response(
+            data={"currencies": serializer.data},
+            status_code=status.HTTP_200_OK,
+        )
+    
+    def retrieve(self, request, *args, **kwargs):
+        """Get specific currency."""
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        
+        return success_response(
+            data={"currency": serializer.data},
+            status_code=status.HTTP_200_OK,
+        )
+
 
 
 class LocationsView(APIView):

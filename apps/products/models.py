@@ -3,8 +3,6 @@ from __future__ import annotations
 from django.db import models
 from django.db.models import Q
 
-from apps.common.models import Currency, UnitOfMeasure
-
 
 class WarehouseOwnerType(models.TextChoices):
     COMPANY = "company", "Company"
@@ -120,12 +118,11 @@ class Product(models.Model):
     )
     brand = models.CharField(max_length=128, blank=True, default="")
     unit = models.ForeignKey(
-        UnitOfMeasure,
+        "common.UnitOfMeasure",
         on_delete=models.PROTECT,
         related_name="products",
         help_text="Required. Pick from the predefined catalog, not free text.",
     )
-    image = models.FileField(upload_to="products/", null=True, blank=True)
 
     # Physical attributes, useful for warehousing/shipping.
     weight = models.DecimalField(max_digits=10, decimal_places=3, null=True, blank=True)
@@ -177,6 +174,36 @@ class Product(models.Model):
         return self.name
 
 
+class ProductImage(models.Model):
+    """A product can have multiple images; one may be flagged as primary/cover."""
+
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="images")
+    image = models.FileField(upload_to="products/")
+    alt_text = models.CharField(max_length=255, blank=True, default="")
+    is_primary = models.BooleanField(default=False)
+    sort_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "product_image"
+        constraints = [
+            # At most one primary image per product.
+            models.UniqueConstraint(
+                fields=["product"],
+                condition=Q(is_primary=True),
+                name="product_image_one_primary",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["product"], name="product_image_product_idx"),
+        ]
+        ordering = ["sort_order", "id"]
+
+    def __str__(self) -> str:
+        return f"Image for {self.product}"
+
+
 class PriceType(models.TextChoices):
     STANDARD = "standard", "Standard"
     WHOLESALE = "wholesale", "Wholesale"
@@ -195,7 +222,7 @@ class ProductPrice(models.Model):
 
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="prices")
     currency = models.ForeignKey(
-        Currency, on_delete=models.PROTECT, related_name="product_prices"
+        "common.Currency", on_delete=models.PROTECT, related_name="product_prices"
     )
     price_type = models.CharField(
         max_length=16, choices=PriceType.choices, default=PriceType.STANDARD

@@ -39,9 +39,7 @@ class Command(BaseCommand):
         """Seed common currencies (ISO 4217)."""
         currencies = [
             ("USD", "US Dollar", "$"),
-            ("EUR", "Euro", "€"),
             ("SYP", "Syrian Pound", "ل.س"),
-            ("GBP", "British Pound", "£"),
             ("TRY", "Turkish Lira", "₺"),
         ]
 

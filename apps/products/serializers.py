@@ -463,8 +463,45 @@ class ProductDetailSerializer(serializers.ModelSerializer):
         return value
 
 
+class ProductImageWriteSerializer(serializers.ModelSerializer):
+    """Nested serializer for creating/updating product images."""
+    
+    class Meta:
+        model = ProductImage
+        fields = ["id", "image", "alt_text", "is_primary", "sort_order"]
+        extra_kwargs = {
+            "id": {"required": False},  # ID is optional (used for updates)
+        }
+
+
+class ProductPriceWriteSerializer(serializers.ModelSerializer):
+    """Nested serializer for creating/updating product prices."""
+    
+    class Meta:
+        model = ProductPrice
+        fields = [
+            "id",
+            "currency",
+            "price_type",
+            "customer_category",
+            "price",
+            "is_default",
+            "valid_from",
+            "valid_until",
+        ]
+        extra_kwargs = {
+            "id": {"required": False},  # ID is optional (used for updates)
+        }
+    
+    def validate_currency(self, value):
+        """Validate currency exists and is active."""
+        if not Currency.objects.filter(id=value.id, is_active=True).exists():
+            raise serializers.ValidationError("العملة غير موجودة أو غير نشطة")
+        return value
+
+
 class ProductWriteSerializer(serializers.ModelSerializer):
-    """Serializer for creating/updating products with custom fields."""
+    """Serializer for creating/updating products with nested related models."""
     
     custom_fields = serializers.DictField(
         child=serializers.CharField(allow_blank=True),
@@ -472,6 +509,8 @@ class ProductWriteSerializer(serializers.ModelSerializer):
         write_only=True,
         help_text="Dict of custom field key-value pairs"
     )
+    images = ProductImageWriteSerializer(many=True, required=False)
+    prices = ProductPriceWriteSerializer(many=True, required=False)
     
     class Meta:
         model = Product
@@ -499,6 +538,8 @@ class ProductWriteSerializer(serializers.ModelSerializer):
             "notes",
             "is_active",
             "custom_fields",
+            "images",
+            "prices",
         ]
     
     def validate_category(self, value):
@@ -560,14 +601,82 @@ class ProductWriteSerializer(serializers.ModelSerializer):
         
         return value
     
+    def validate_prices(self, value):
+        """Validate price data and constraints."""
+        if not value:
+            return value
+        
+        company_id = self.context.get("company_id")
+        
+        # Check for duplicate price definitions in the same request
+        price_keys = []
+        for price_data in value:
+            currency = price_data.get("currency")
+            price_type = price_data.get("price_type", "standard")
+            customer_category = price_data.get("customer_category")
+            
+            # Validate customer category if provided
+            if customer_category:
+                from django.db.models import Q
+                from apps.customers.models import CustomerCategory
+                
+                category_valid = CustomerCategory.objects.filter(
+                    Q(company__isnull=True) | Q(company_id=company_id),
+                    id=customer_category.id,
+                    is_active=True
+                ).exists()
+                
+                if not category_valid:
+                    raise serializers.ValidationError("تصنيف العميل غير موجود أو غير متاح")
+            
+            # Create a key for uniqueness checking
+            key = (currency.id if currency else None, price_type, customer_category.id if customer_category else None)
+            if key in price_keys:
+                raise serializers.ValidationError("يوجد أسعار مكررة في الطلب")
+            price_keys.append(key)
+        
+        # Validate only one default price
+        default_count = sum(1 for p in value if p.get("is_default", False))
+        if default_count > 1:
+            raise serializers.ValidationError("يمكن تحديد سعر افتراضي واحد فقط")
+        
+        # Default price must not have customer_category
+        for price_data in value:
+            if price_data.get("is_default") and price_data.get("customer_category"):
+                raise serializers.ValidationError("السعر الافتراضي يجب أن يكون عاماً (بدون تصنيف عميل)")
+        
+        return value
+    
+    def validate_images(self, value):
+        """Validate image data."""
+        if not value:
+            return value
+        
+        # Count primary images
+        primary_count = sum(1 for img in value if img.get("is_primary", False))
+        if primary_count > 1:
+            raise serializers.ValidationError("يمكن تحديد صورة رئيسية واحدة فقط")
+        
+        return value
+    
     @transaction.atomic
     def create(self, validated_data):
-        """Create product with custom fields."""
+        """Create product with nested images, prices, and custom fields."""
         custom_fields = validated_data.pop("custom_fields", {})
+        images_data = validated_data.pop("images", [])
+        prices_data = validated_data.pop("prices", [])
         company_id = self.context.get("company_id")
         
         # Create product
         product = Product.objects.create(company_id=company_id, **validated_data)
+        
+        # Create images
+        if images_data:
+            self._create_images(product, images_data)
+        
+        # Create prices
+        if prices_data:
+            self._create_prices(product, prices_data)
         
         # Create custom field values
         if custom_fields:
@@ -577,8 +686,10 @@ class ProductWriteSerializer(serializers.ModelSerializer):
     
     @transaction.atomic
     def update(self, instance, validated_data):
-        """Update product with custom fields."""
+        """Update product with nested images, prices, and custom fields."""
         custom_fields = validated_data.pop("custom_fields", None)
+        images_data = validated_data.pop("images", None)
+        prices_data = validated_data.pop("prices", None)
         company_id = self.context.get("company_id")
         
         # Update product fields
@@ -587,11 +698,106 @@ class ProductWriteSerializer(serializers.ModelSerializer):
         
         instance.save()
         
+        # Update images if provided
+        if images_data is not None:
+            self._update_images(instance, images_data)
+        
+        # Update prices if provided
+        if prices_data is not None:
+            self._update_prices(instance, prices_data)
+        
         # Update custom field values if provided
         if custom_fields is not None:
             self._upsert_custom_fields(instance, custom_fields, company_id)
         
         return instance
+    
+    def _create_images(self, product, images_data):
+        """Create images for a product."""
+        has_primary = any(img.get("is_primary", False) for img in images_data)
+        
+        for idx, image_data in enumerate(images_data):
+            # If no primary specified, make the first one primary
+            if not has_primary and idx == 0:
+                image_data["is_primary"] = True
+            
+            ProductImage.objects.create(product=product, **image_data)
+    
+    def _update_images(self, product, images_data):
+        """Update images for a product (replace strategy)."""
+        # Get IDs of images to keep
+        keep_ids = [img["id"] for img in images_data if "id" in img]
+        
+        # Delete images not in the list
+        ProductImage.objects.filter(product=product).exclude(id__in=keep_ids).delete()
+        
+        # If marking a new primary, unset existing primary first
+        has_new_primary = any(img.get("is_primary", False) for img in images_data)
+        if has_new_primary:
+            ProductImage.objects.filter(product=product, is_primary=True).update(is_primary=False)
+        
+        has_primary = False
+        
+        # Update or create images
+        for idx, image_data in enumerate(images_data):
+            image_id = image_data.pop("id", None)
+            
+            if image_id:
+                # Update existing
+                ProductImage.objects.filter(id=image_id, product=product).update(**image_data)
+                if image_data.get("is_primary"):
+                    has_primary = True
+            else:
+                # Create new
+                # If no primary exists yet and this is first new image, make it primary
+                if not has_primary and not image_data.get("is_primary"):
+                    existing_primary = ProductImage.objects.filter(product=product, is_primary=True).exists()
+                    if not existing_primary:
+                        image_data["is_primary"] = True
+                        has_primary = True
+                
+                ProductImage.objects.create(product=product, **image_data)
+    
+    def _create_prices(self, product, prices_data):
+        """Create prices for a product."""
+        for price_data in prices_data:
+            ProductPrice.objects.create(product=product, **price_data)
+    
+    def _update_prices(self, product, prices_data):
+        """Update prices for a product (replace strategy)."""
+        # Get IDs of prices to keep
+        keep_ids = [price["id"] for price in prices_data if "id" in price]
+        
+        # Delete prices not in the list
+        ProductPrice.objects.filter(product=product).exclude(id__in=keep_ids).delete()
+        
+        # Update or create prices
+        for price_data in prices_data:
+            price_id = price_data.pop("id", None)
+            
+            if price_id:
+                # Update existing
+                ProductPrice.objects.filter(id=price_id, product=product).update(**price_data)
+            else:
+                # Create new - validate uniqueness
+                currency = price_data.get("currency")
+                price_type = price_data.get("price_type", "standard")
+                customer_category = price_data.get("customer_category")
+                
+                # Check if price already exists
+                query = ProductPrice.objects.filter(
+                    product=product,
+                    currency=currency,
+                    price_type=price_type
+                )
+                
+                if customer_category:
+                    query = query.filter(customer_category=customer_category)
+                else:
+                    query = query.filter(customer_category__isnull=True)
+                
+                if not query.exists():
+                    ProductPrice.objects.create(product=product, **price_data)
     
     def _upsert_custom_fields(self, product, custom_fields, company_id):
         """Upsert custom field values for a product."""

@@ -12,6 +12,7 @@ from apps.common.models import Currency
 from apps.companies.mixins import TenantScopedViewMixin
 from apps.products.models import (
     CustomFieldDefinition,
+    CustomFieldValue,
     Product,
     ProductCategory,
     ProductImage,
@@ -267,7 +268,7 @@ class ProductViewSet(TenantScopedViewMixin, viewsets.ModelViewSet):
                 ),
                 Prefetch(
                     "custom_field_values",
-                    queryset=ProductImage.objects.select_related("definition"),
+                    queryset=CustomFieldValue.objects.select_related("definition"),
                 ),
             )
         

@@ -9,6 +9,11 @@ class WarehouseOwnerType(models.TextChoices):
     REP = "rep", "Rep"
 
 
+class ProductStatus(models.TextChoices):
+    DRAFT = "draft", "Draft"
+    PUBLISHED = "published", "Published"
+
+
 class Warehouse(models.Model):
     """Belongs to a Company. Rep warehouses reuse this table (plan §2 default; §7 still open)."""
 
@@ -151,6 +156,11 @@ class Product(models.Model):
     )
     notes = models.TextField(blank=True, default="")
 
+    status = models.CharField(
+        max_length=16, 
+        choices=ProductStatus.choices, 
+        default=ProductStatus.PUBLISHED
+    )
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

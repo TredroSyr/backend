@@ -7,6 +7,9 @@ from django.db.models import Count, Prefetch, Q
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.parsers import JSONParser
+
+from .parsers import NestedJSONMultiPartParser
 
 from apps.common.models import Currency
 from apps.companies.mixins import TenantScopedViewMixin
@@ -191,6 +194,7 @@ class ProductViewSet(TenantScopedViewMixin, viewsets.ModelViewSet):
     """
     
     permission_classes = [IsAuthenticated]
+    parser_classes = [NestedJSONMultiPartParser, JSONParser]
     queryset = Product.objects.all()
     
     def get_serializer_class(self):

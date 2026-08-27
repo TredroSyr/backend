@@ -725,38 +725,33 @@ class ProductWriteSerializer(serializers.ModelSerializer):
     
     def _update_images(self, product, images_data):
         """Update images for a product (replace strategy)."""
-        # Get IDs of images to keep
         keep_ids = [img["id"] for img in images_data if "id" in img]
-        
-        # Delete images not in the list
+
+        # Delete images not in the incoming list
         ProductImage.objects.filter(product=product).exclude(id__in=keep_ids).delete()
-        
-        # If marking a new primary, unset existing primary first
+
+        # If a new primary is being set, unset any existing primary first
         has_new_primary = any(img.get("is_primary", False) for img in images_data)
         if has_new_primary:
             ProductImage.objects.filter(product=product, is_primary=True).update(is_primary=False)
-        
-        has_primary = False
-        
-        # Update or create images
-        for idx, image_data in enumerate(images_data):
+
+        touched = []
+        for image_data in images_data:
             image_id = image_data.pop("id", None)
-            
+
             if image_id:
-                # Update existing
                 ProductImage.objects.filter(id=image_id, product=product).update(**image_data)
-                if image_data.get("is_primary"):
-                    has_primary = True
+                image = ProductImage.objects.get(id=image_id, product=product)
             else:
-                # Create new
-                # If no primary exists yet and this is first new image, make it primary
-                if not has_primary and not image_data.get("is_primary"):
-                    existing_primary = ProductImage.objects.filter(product=product, is_primary=True).exists()
-                    if not existing_primary:
-                        image_data["is_primary"] = True
-                        has_primary = True
-                
-                ProductImage.objects.create(product=product, **image_data)
+                image = ProductImage.objects.create(product=product, **image_data)
+
+            touched.append(image)
+
+        # Invariant: if the product has any images left, exactly one must be primary.
+        if touched and not ProductImage.objects.filter(product=product, is_primary=True).exists():
+            fallback = touched[0]
+            fallback.is_primary = True
+            fallback.save(update_fields=["is_primary"])
     
     def _create_prices(self, product, prices_data):
         """Create prices for a product."""
@@ -765,39 +760,42 @@ class ProductWriteSerializer(serializers.ModelSerializer):
     
     def _update_prices(self, product, prices_data):
         """Update prices for a product (replace strategy)."""
-        # Get IDs of prices to keep
         keep_ids = [price["id"] for price in prices_data if "id" in price]
-        
-        # Delete prices not in the list
+
+        # Delete prices not in the incoming list
         ProductPrice.objects.filter(product=product).exclude(id__in=keep_ids).delete()
-        
-        # Update or create prices
+
         for price_data in prices_data:
             price_id = price_data.pop("id", None)
-            
+
             if price_id:
-                # Update existing
                 ProductPrice.objects.filter(id=price_id, product=product).update(**price_data)
-            else:
-                # Create new - validate uniqueness
-                currency = price_data.get("currency")
-                price_type = price_data.get("price_type", "standard")
-                customer_category = price_data.get("customer_category")
-                
-                # Check if price already exists
-                query = ProductPrice.objects.filter(
-                    product=product,
-                    currency=currency,
-                    price_type=price_type
-                )
-                
-                if customer_category:
-                    query = query.filter(customer_category=customer_category)
-                else:
-                    query = query.filter(customer_category__isnull=True)
-                
-                if not query.exists():
-                    ProductPrice.objects.create(product=product, **price_data)
+                continue
+
+            currency = price_data.get("currency")
+            price_type = price_data.get("price_type", "standard")
+            customer_category = price_data.get("customer_category")
+
+            query = ProductPrice.objects.filter(
+                product=product,
+                currency=currency,
+                price_type=price_type,
+            )
+            query = (
+                query.filter(customer_category=customer_category)
+                if customer_category
+                else query.filter(customer_category__isnull=True)
+            )
+
+            if query.exists():
+                raise serializers.ValidationError({
+                    "prices": (
+                        f"يوجد سعر بالفعل بنفس العملة ونوع السعر"
+                        f"{' وتصنيف العميل' if customer_category else ''}"
+                    )
+                })
+
+            ProductPrice.objects.create(product=product, **price_data)
     
     def _upsert_custom_fields(self, product, custom_fields, company_id):
         """Upsert custom field values for a product."""

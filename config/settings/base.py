@@ -33,14 +33,14 @@ CORS_ALLOWED_ORIGINS = env_list(
     "DJANGO_CORS_ALLOWED_ORIGINS",
     default=(
         "https://localhost",
-        "capacitor://localhost,",
-        "http://localhost:3000,",
-        "http://localhost:5173,",
-        "https://tredro-dashboard.vercel.app,"
-        "https://tredro-mandoub.vercel.app,"
-        'https://tredro.online',
-        'https://www.tredro.online',
-        'https://dashboard.tredro.online',
+        "capacitor://localhost",
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "https://tredro-dashboard.vercel.app",
+        "https://tredro-mandoub.vercel.app",
+        "https://tredro.online",
+        "https://www.tredro.online",
+        "https://dashboard.tredro.online",
     ),
 )
 CORS_ALLOW_CREDENTIALS = env_bool("DJANGO_CORS_ALLOW_CREDENTIALS", default=True)

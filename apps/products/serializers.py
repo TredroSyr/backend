@@ -759,8 +759,11 @@ class ProductWriteSerializer(serializers.ModelSerializer):
             image_id = image_data.pop("id", None)
 
             if image_id:
-                ProductImage.objects.filter(id=image_id, product=product).update(**image_data)
+                # Update existing image: use model instance to avoid FileField issues
                 image = ProductImage.objects.get(id=image_id, product=product)
+                for field, value in image_data.items():
+                    setattr(image, field, value)
+                image.save()
             else:
                 image = ProductImage.objects.create(product=product, **image_data)
 

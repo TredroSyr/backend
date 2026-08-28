@@ -32,10 +32,10 @@ ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS", default="localhost,127.0.0.1")
 CORS_ALLOWED_ORIGINS = env_list(
     "DJANGO_CORS_ALLOWED_ORIGINS",
     default=(
-        "https://localhost"
-        "capacitor://localhost,"
-        "http://localhost:3000,"
-        "http://localhost:5173,"
+        "https://localhost",
+        "capacitor://localhost,",
+        "http://localhost:3000,",
+        "http://localhost:5173,",
         "https://tredro-dashboard.vercel.app,"
         "https://tredro-mandoub.vercel.app,"
         'https://tredro.online',

@@ -64,6 +64,8 @@ class ProductCategorySerializer(serializers.ModelSerializer):
 class ProductImageSerializer(serializers.ModelSerializer):
     """Serializer for ProductImage."""
     
+    image = serializers.SerializerMethodField()
+    
     class Meta:
         model = ProductImage
         fields = [
@@ -76,6 +78,12 @@ class ProductImageSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["id", "created_at", "updated_at"]
+    
+    def get_image(self, obj):
+        """Return relative path for image, frontend adds base URL."""
+        if obj.image:
+            return obj.image.name
+        return None
     
     def validate(self, data):
         """Validate primary image constraint."""
@@ -349,6 +357,7 @@ class ProductListSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "name",
+            "description",
             "sku",
             "barcode",
             "brand",
@@ -356,23 +365,36 @@ class ProductListSerializer(serializers.ModelSerializer):
             "category_name",
             "unit",
             "unit_name",
+            "weight",
+            "weight_unit",
+            "length",
+            "width",
+            "height",
+            "dimension_unit",
+            "reorder_point",
+            "reorder_quantity",
+            "is_taxable",
+            "tax_rate",
             "is_active",
             "is_sellable",
             "is_purchasable",
             "status",
+            "external_reference",
+            "notes",
             "primary_image",
             "default_price",
             "created_at",
+            "updated_at",
         ]
         read_only_fields = fields
     
     def get_primary_image(self, obj):
         """Get primary image URL if exists."""
         primary = obj.images.filter(is_primary=True).first()
-        if primary:
+        if primary and primary.image:
             return {
                 "id": primary.id,
-                "image": primary.image.url if primary.image else None,
+                "image": primary.image.name,
                 "alt_text": primary.alt_text,
             }
         return None
@@ -690,9 +712,11 @@ class ProductWriteSerializer(serializers.ModelSerializer):
     @transaction.atomic
     def update(self, instance, validated_data):
         """Update product with nested images, prices, and custom fields."""
-        custom_fields = validated_data.pop("custom_fields", None)
-        images_data = validated_data.pop("images", None)
-        prices_data = validated_data.pop("prices", None)
+        # Only pop if the key exists in validated_data - this ensures we don't update
+        # nested relations unless they were explicitly provided in the request
+        custom_fields = validated_data.pop("custom_fields") if "custom_fields" in validated_data else None
+        images_data = validated_data.pop("images") if "images" in validated_data else None
+        prices_data = validated_data.pop("prices") if "prices" in validated_data else None
         company_id = self.context.get("company_id")
         
         # Update product fields
@@ -701,15 +725,15 @@ class ProductWriteSerializer(serializers.ModelSerializer):
         
         instance.save()
         
-        # Update images if provided
+        # Update images only if explicitly provided in request
         if images_data is not None:
             self._update_images(instance, images_data)
         
-        # Update prices if provided
+        # Update prices only if explicitly provided in request
         if prices_data is not None:
             self._update_prices(instance, prices_data)
         
-        # Update custom field values if provided
+        # Update custom field values only if explicitly provided in request
         if custom_fields is not None:
             self._upsert_custom_fields(instance, custom_fields, company_id)
         

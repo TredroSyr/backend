@@ -64,8 +64,6 @@ class ProductCategorySerializer(serializers.ModelSerializer):
 class ProductImageSerializer(serializers.ModelSerializer):
     """Serializer for ProductImage."""
     
-    image = serializers.SerializerMethodField()
-    
     class Meta:
         model = ProductImage
         fields = [
@@ -78,12 +76,6 @@ class ProductImageSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["id", "created_at", "updated_at"]
-    
-    def get_image(self, obj):
-        """Return relative path for image, frontend adds base URL."""
-        if obj.image:
-            return obj.image.name
-        return None
     
     def validate(self, data):
         """Validate primary image constraint."""
@@ -394,7 +386,7 @@ class ProductListSerializer(serializers.ModelSerializer):
         if primary and primary.image:
             return {
                 "id": primary.id,
-                "image": primary.image.name,
+                "image": primary.image.url,
                 "alt_text": primary.alt_text,
             }
         return None

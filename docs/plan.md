@@ -142,23 +142,23 @@ Resolves the previously-open fulfillment gap in section 9.2 of the spec.
 - [ ] Product↔Warehouse assignment (new, §2)
 
 ### Phase 3 — Order Engine
-- [ ] Rep → Company order state machine
-- [ ] Customer → Company order state machine (incl. rep-assignment branch, §3)
-- [ ] `StockMovement` ledger (warehouse-aware, §2)
-- [ ] Derived balance calculation (company warehouse / rep warehouse)
-- [ ] Transaction-safe, row-locked balance-affecting transitions
+- [x] Rep → Company state machine — now `orders.StockTransfer` (invoicing spec §3.2), not an Order
+- [x] Customer → Company — now `orders.CustomerRequest`, an informational signal, not a sale (invoicing spec §3.3)
+- [x] `StockMovement` ledger (warehouse-aware, §2) — moved to `apps.products`, written only via `products.services.stock`
+- [x] Derived balance calculation (company warehouse / rep warehouse)
+- [x] Transaction-safe, row-locked balance-affecting transitions
 
 ### Phase 4 — Invoicing
-- [ ] Incoming Invoice (tied to stock receipt + tax settings)
-- [ ] Return Invoice (tied to rep-initiated return)
-- [ ] Invoice immutability (corrections appended, not edited in place)
+- [x] Incoming Invoice (tied to stock receipt + tax settings)
+- [x] Return Invoice — now a credit note against a required Sales Invoice (invoicing spec §3.5)
+- [x] Invoice immutability (payments/returns appended, derived fields recomputed; audit trail in `common.AuditLog`)
 
 ### Phase 5 — Notifications
 - [ ] Domain events defined (`OrderApproved`, `OrderAdjusted`, `NewOrderReceived`, `RepAssignmentNeeded`, etc.)
 - [ ] Queue-based dispatcher (Redis/BullMQ, SQS, Celery, etc.)
 - [ ] Push (FCM) integration
-- [ ] In-app notification records
-- [ ] Role-based targeting (derived from permission model)
+- [x] In-app notification records (`notifications.services`)
+- [x] Role-based targeting (derived from permission model)
 
 ### Phase 6 — Hardening (ongoing, not a final step)
 - [ ] Unit tests: state machine, permission middleware (highest priority)
@@ -212,3 +212,15 @@ _Add an entry here each time an open question above gets resolved, with date and
 - 2026-08-14: Confirmed units (`liter`, `kg`, `package`) are seeded in `products.0002_seed_units`. Full unit catalog still open. No default SaaS plan seed yet (§7 / Phase 1 entitlement).
 - 2026-08-14: `docs/schema_phase0.py` is historical; live schema is the app models + migrations. No §7 item was resolved.
 - 2026-08-16: Phase 1 (Identity & Access) completed. Implemented Admin/SubUser and Rep authentication with JWT tokens containing `actor_type` and `company_id` claims. Created tenant-scoping middleware, permission system with Role/ModulePermission, and entitlement service for SaaS limits. Seeded Free plan with resource limits (reps:5, products:50, subusers:3, warehouses:2). Auto-subscribe new companies on signup. Customer auth deferred to later phase. Comprehensive test coverage added for all auth flows.
+- 2026-08-29: Invoicing module built to `invoicing-module-spec.md`, which supersedes the original doc's sections 8 and 9. Notes on what changed structurally:
+  - **`Order`/`OrderItem` are gone.** They are replaced by `orders.StockTransfer` (company→rep goods movement, no money, no tax) and `orders.CustomerRequest` (a wishlist signal, explicitly *not* a sale). Neither model had an API, a serializer or a writer, so no data could exist; the migration drops them.
+  - **`invoices.Invoice`/`InvoiceItem` are gone**, replaced by `IncomingInvoice`, `SalesInvoice`, `ReturnInvoice`, `PaymentCollection`, `PendingCustomerCredit` and `InvoiceSettings`. Same reasoning — the old pair was an unused stub.
+  - **`StockMovement` moved from `apps.orders` to `apps.products`** (same `stock_movement` table). Inventory owns the ledger because both `invoices` and `orders` write to it; this keeps `products` a leaf app that imports neither. Source documents are referenced by `(source_type, source_id)` rather than one nullable FK per document type, so a new document type is a data concern, not a migration. `products.0004` depends on `orders.0003` so the old table is dropped before the new one is created.
+  - **The sale is the rep's document, not the customer's order.** A customer request creates no financial record and moves no stock; the rep issues the Sales Invoice face-to-face on delivery and may optionally link the requests it fulfils.
+  - **Payment is not binary.** `paid_amount`/`returned_amount`/`balance_due`/`status` on `SalesInvoice` are derived from `PaymentCollection` and issued `ReturnInvoice` rows and recomputed on every mutation (`invoices.services.balances`). No credit limit, per the spec's explicit decision.
+  - **Over-return overage is measured per return, not cumulatively.** The spec's formula `(returned + paid) - total` is the invoice-level figure; applying it verbatim to a *second* return would re-refund what the first already paid back, so each return records the increment it creates. Both resolution paths are built: `cash_refunded_by_rep` writes a negative `RepCashAdjustment` (deducted from the rep's expected cash-in), `deferred_customer_credit` writes a `PendingCustomerCredit`.
+  - **`RepCashAdjustment` is new**, not in the spec's entity list. The `cash_refunded_by_rep` path requires the overage to come off the rep's next reconciliation, and there is no settlement entity; this append-only row plus collected payments is enough to state that figure (`invoices.services.reports.rep_cash_reconciliation`) without building a settlement module.
+  - **Cash overpayment is refused.** The spec defines an overage only via returns, which carry a `refund_method`; a bare payment exceeding the balance has no defined resolution, so `add_payment` rejects it rather than leaving unaccounted money.
+  - **Module permissions split per document type** (§6.7): `incoming_invoices`, `stock_transfers`, `customer_requests`, `sales_invoices`, `return_invoices`, `payment_collections`, `customer_credits`. `apps/common/modules.py` is now the single source for the catalog used by the owner short-circuit, `GET /api/modules`, and every view's `required_module`. The legacy `invoices`/`orders` keys still grant the granular ones *and* stay in the resolved permission payload, so existing roles and dashboards keep working with no data migration.
+  - Idempotency (§6.6) is opt-in per request via an `Idempotency-Key` header on the rep app's create/receive/payment endpoints, backed by `common.IdempotencyKey`.
+  - Still open, unchanged: incoming-invoice payment terms (§7 of the original doc, §8 of the invoicing spec) — `IncomingInvoice` has no payment-status fields yet.

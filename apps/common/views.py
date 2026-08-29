@@ -7,6 +7,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
 from apps.common.models import Currency, UnitOfMeasure
+from apps.common.modules import module_choices
 from apps.common.serializers import CurrencySerializer, UnitOfMeasureSerializer
 from core.responses import success_response
 
@@ -350,43 +351,11 @@ class ModulesView(APIView):
     
     def get(self, request):
         """Get available modules."""
-        modules = [
-            {
-                "value": "customers",
-                "label": "العملاء",
-                "label_en": "Customers",
-            },
-            {
-                "value": "invoices",
-                "label": "الفواتير",
-                "label_en": "Invoices",
-            },
-            {
-                "value": "orders",
-                "label": "الطلبات",
-                "label_en": "Orders",
-            },
-            {
-                "value": "products",
-                "label": "المنتجات",
-                "label_en": "Products",
-            },
-            {
-                "value": "reps",
-                "label": "المندوبين",
-                "label_en": "Representatives",
-            },
-            {
-                "value": "notifications",
-                "label": "الإشعارات",
-                "label_en": "Notifications",
-            },
-        ]
-        
         return success_response(
-            data={"modules": modules},
+            data={"modules": module_choices()},
             status_code=status.HTTP_200_OK,
         )
+
 
 class ApkVersionView(APIView):
     """

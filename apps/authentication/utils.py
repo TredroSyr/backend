@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Literal
 from django.contrib.auth.hashers import check_password, make_password
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from apps.common.modules import LEGACY_MODULE_ALIASES, PERMISSION_MODULE_KEYS
+
 if TYPE_CHECKING:
     from apps.companies.models import SubUser
     from apps.customers.models import Customer
@@ -137,36 +139,34 @@ def generate_tokens_for_customer(customer: Customer) -> dict[str, str]:
 def get_permissions_for_subuser(subuser: SubUser) -> dict[str, dict[str, bool]]:
     """
     Get all module permissions for a SubUser.
-    Owners get full access to everything.
+    Owners get full access to every module in the catalog.
     Staff members get permissions based on their role.
+
+    Roles created before the invoicing spec split "invoices"/"orders" into
+    per-document modules still work: LEGACY_MODULE_ALIASES expands an old key to
+    the granular ones it used to cover *and* keeps the old key itself, so no data
+    migration is needed, no existing role silently loses access, and dashboards
+    reading `permissions["orders"]` keep working.
     """
     if subuser.is_owner:
-        # Owners have full access to all modules
-        modules = [
-            "products",
-            "orders",
-            "customers",
-            "invoices",
-            "billing",
-            "reps",
-            "notifications",
-            "reports",
-            "settings",
-        ]
         return {
-            module: {"can_view": True, "can_action": True} for module in modules
+            module: {"can_view": True, "can_action": True}
+            for module in PERMISSION_MODULE_KEYS
         }
-    
-    # For staff members, load permissions from their role
-    permissions = {}
-    if subuser.role:
-        module_perms = subuser.role.permissions.all()
-        for perm in module_perms:
-            permissions[perm.module] = {
-                "can_view": perm.can_view,
-                "can_action": perm.can_action,
-            }
-    
+
+    permissions: dict[str, dict[str, bool]] = {}
+    if not subuser.role:
+        return permissions
+
+    for perm in subuser.role.permissions.all():
+        granted = {"can_view": perm.can_view, "can_action": perm.can_action}
+        for module in LEGACY_MODULE_ALIASES.get(perm.module, (perm.module,)):
+            existing = permissions.setdefault(
+                module, {"can_view": False, "can_action": False}
+            )
+            existing["can_view"] |= granted["can_view"]
+            existing["can_action"] |= granted["can_action"]
+
     return permissions
 
 

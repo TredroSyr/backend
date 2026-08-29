@@ -1,158 +1,269 @@
+"""Non-financial documents: stock transfers and customer requests.
+
+Both entities here replace what the original MVP doc modelled as an `Order`
+(invoicing spec §1). Neither carries money or tax fields, and the distinction is
+the point of the whole module:
+
+* **Stock Transfer** (§3.2) moves goods company -> rep. No money changes hands
+  internally, so it is a lightweight transfer record, not a tax-bearing invoice.
+* **Customer Request** (§3.3) is a wishlist signal telling a rep what a customer
+  wants on the next visit. It is *not* a sale and creates no commitment; the sale
+  happens face-to-face and produces an `invoices.SalesInvoice`.
+
+The financial documents live in `apps.invoices`; the stock ledger both of these
+write to lives in `apps.products`.
+"""
+
 from __future__ import annotations
 
 from django.db import models
 
-
-class OrderType(models.TextChoices):
-    REP_TO_COMPANY = "rep_to_company", "Rep → Company"
-    CUSTOMER_TO_COMPANY = "customer_to_company", "Customer → Company"
+from apps.common.models import TimeStampedModel
+from apps.products.models import ProductLine
 
 
-class OrderStatus(models.TextChoices):
-    """Known values from §3 only. Customer→Company states after assignment are §7."""
+class StockTransferStatus(models.TextChoices):
+    """§3.2 state machine. `received` is the only state that moves stock."""
 
-    PENDING_REP_ASSIGNMENT = "pending_rep_assignment", "Pending rep assignment"
-    READY_FOR_PICKUP = "ready_for_pickup", "Ready for pickup"
-    RECEIVED_CONFIRMED = "received_confirmed", "Received confirmed"
-
-
-class StockMovementType(models.TextChoices):
-    INITIAL = "initial", "Initial stock"
-    INCOMING = "incoming", "Incoming invoice receipt"
-    ORDER_OUT = "order_out", "Stock leaving a warehouse (order)"
-    ORDER_IN = "order_in", "Stock entering a warehouse (order)"
-    RETURN_IN = "return_in", "Return received into a warehouse"
-    RETURN_OUT = "return_out", "Return leaving a warehouse"
-    ADJUSTMENT = "adjustment", "Manual adjustment"
+    PENDING = "pending", "Pending admin review"
+    MODIFIED_BY_ADMIN = "modified_by_admin", "Modified by admin"
+    PENDING_REP_CONFIRMATION = "pending_rep_confirmation", "Pending rep confirmation"
+    CONFIRMED = "confirmed", "Confirmed"
+    RECEIVED = "received", "Received"
+    CANCELLED = "cancelled", "Cancelled"
 
 
-class Order(models.Model):
-    """Both Rep→Company and Customer→Company flows. fulfilling_rep is distinct from placing_rep."""
+#: Allowed transitions, enforced by `services.transfers`. Mirrors §3.2 exactly:
+#:
+#:   pending -> admin approves as-is      -> confirmed
+#:           -> admin modifies quantities -> modified_by_admin
+#:                -> awaiting the rep     -> pending_rep_confirmation
+#:                     -> rep approves    -> confirmed
+#:                     -> rep rejects     -> cancelled
+#:   confirmed -> rep taps "received"     -> received
+STOCK_TRANSFER_TRANSITIONS: dict[str, set[str]] = {
+    StockTransferStatus.PENDING: {
+        StockTransferStatus.CONFIRMED,
+        StockTransferStatus.MODIFIED_BY_ADMIN,
+        StockTransferStatus.CANCELLED,
+    },
+    StockTransferStatus.MODIFIED_BY_ADMIN: {
+        StockTransferStatus.PENDING_REP_CONFIRMATION,
+        StockTransferStatus.CANCELLED,
+    },
+    StockTransferStatus.PENDING_REP_CONFIRMATION: {
+        StockTransferStatus.CONFIRMED,
+        StockTransferStatus.CANCELLED,
+    },
+    StockTransferStatus.CONFIRMED: {
+        StockTransferStatus.RECEIVED,
+        StockTransferStatus.CANCELLED,
+    },
+    StockTransferStatus.RECEIVED: set(),
+    StockTransferStatus.CANCELLED: set(),
+}
+
+
+class StockTransfer(TimeStampedModel):
+    """Company warehouse -> rep warehouse. Not an invoice: no tax fields, no total.
+
+    Confirmation and physical receipt are deliberately two steps. Confirming only
+    means the rep agreed to the quantity; stock moves on `received` and nowhere
+    else, matching the two-step flow the original doc describes.
+    """
 
     company = models.ForeignKey(
         "companies.Company",
         on_delete=models.CASCADE,
-        related_name="orders",
+        related_name="stock_transfers",
     )
-    order_type = models.CharField(max_length=32, choices=OrderType.choices)
-    status = models.CharField(max_length=64)
+    number = models.CharField(max_length=32)
+    rep = models.ForeignKey(
+        "reps.Rep",
+        on_delete=models.PROTECT,
+        related_name="stock_transfers",
+    )
+    source_warehouse = models.ForeignKey(
+        "products.Warehouse",
+        on_delete=models.PROTECT,
+        related_name="outgoing_transfers",
+        help_text="Company warehouse the goods leave.",
+    )
+    destination_warehouse = models.ForeignKey(
+        "products.Warehouse",
+        on_delete=models.PROTECT,
+        related_name="incoming_transfers",
+        help_text="Rep warehouse the goods arrive in.",
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=StockTransferStatus.choices,
+        default=StockTransferStatus.PENDING,
+    )
+    requested_at = models.DateTimeField()
+    approved_at = models.DateTimeField(null=True, blank=True)
+    received_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    approved_by = models.ForeignKey(
+        "companies.SubUser",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="approved_stock_transfers",
+    )
+    notes = models.TextField(blank=True, default="")
+
+    class Meta:
+        db_table = "stock_transfer"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["company", "number"],
+                name="stock_transfer_company_number_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["company"], name="transfer_company_idx"),
+            models.Index(fields=["company", "status"], name="transfer_status_idx"),
+            models.Index(fields=["rep"], name="transfer_rep_idx"),
+            models.Index(fields=["requested_at"], name="transfer_requested_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return self.number
+
+    def can_transition_to(self, status: str) -> bool:
+        return status in STOCK_TRANSFER_TRANSITIONS.get(self.status, set())
+
+
+class StockTransferLine(ProductLine):
+    """`approved_qty` may differ from `requested_qty` — the admin can cut a line
+    down. It stays null until an admin acts, and the *approved* quantity is what
+    moves on receipt.
+    """
+
+    transfer = models.ForeignKey(
+        StockTransfer, on_delete=models.CASCADE, related_name="lines"
+    )
+    requested_qty = models.DecimalField(max_digits=14, decimal_places=3)
+    approved_qty = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        null=True,
+        blank=True,
+        help_text="Null until an admin approves or modifies the transfer.",
+    )
+
+    class Meta:
+        db_table = "stock_transfer_line"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["transfer", "product"],
+                name="stock_transfer_line_product_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["company"], name="transfer_line_company_idx"),
+            models.Index(fields=["transfer"], name="transfer_line_transfer_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.product_id} x {self.requested_qty}"
+
+    @property
+    def effective_qty(self):
+        """Quantity that will actually move: the approved one, else as requested."""
+        return self.requested_qty if self.approved_qty is None else self.approved_qty
+
+
+class CustomerRequestStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    FULFILLED = "fulfilled", "Fulfilled"
+    CANCELLED = "cancelled", "Cancelled"
+
+
+class CustomerRequest(TimeStampedModel):
+    """A wishlist signal from the customer app — informational only (§3.3).
+
+    Creating one never touches a warehouse and never creates a financial record.
+    It notifies the assigned rep as a heads-up, not an order confirmation.
+
+    `fulfilled_by_invoice` is deliberately optional: a rep may deliver a Sales
+    Invoice containing products that were never requested, and invoice creation
+    is never blocked on a request existing.
+    """
+
+    company = models.ForeignKey(
+        "companies.Company",
+        on_delete=models.CASCADE,
+        related_name="customer_requests",
+        help_text="The company being browsed in the customer app.",
+    )
     customer = models.ForeignKey(
         "customers.Customer",
         on_delete=models.PROTECT,
-        null=True,
-        blank=True,
-        related_name="orders",
-        help_text="Set for customer→company orders.",
+        related_name="requests",
     )
-    placing_rep = models.ForeignKey(
+    rep = models.ForeignKey(
         "reps.Rep",
-        on_delete=models.PROTECT,
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="placed_orders",
-        help_text="Set for rep→company orders (the 'created by' rep).",
+        related_name="customer_requests",
+        help_text="Assigned rep notified at creation time, if the customer has one.",
     )
-    fulfilling_rep = models.ForeignKey(
-        "reps.Rep",
-        on_delete=models.PROTECT,
+    status = models.CharField(
+        max_length=16,
+        choices=CustomerRequestStatus.choices,
+        default=CustomerRequestStatus.PENDING,
+    )
+    fulfilled_by_invoice = models.ForeignKey(
+        "invoices.SalesInvoice",
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name="fulfilling_orders",
-        help_text="Nullable. Required to leave pending_rep_assignment.",
+        related_name="fulfilled_requests",
+        help_text="Set when a rep links a delivery to this request. Optional by design.",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    fulfilled_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    notes = models.TextField(blank=True, default="")
 
     class Meta:
-        db_table = "order"
+        db_table = "customer_request"
         indexes = [
-            models.Index(fields=["company"], name="order_company_idx"),
-            models.Index(fields=["company", "status"], name="order_company_status_idx"),
-            models.Index(fields=["status"], name="order_status_idx"),
-            models.Index(fields=["customer"], name="order_customer_idx"),
-            models.Index(fields=["placing_rep"], name="order_placing_rep_idx"),
-            models.Index(fields=["fulfilling_rep"], name="order_fulfilling_rep_idx"),
+            models.Index(fields=["company"], name="cust_request_company_idx"),
+            models.Index(fields=["company", "status"], name="cust_request_status_idx"),
+            models.Index(fields=["customer"], name="cust_request_customer_idx"),
+            models.Index(fields=["rep"], name="cust_request_rep_idx"),
+            models.Index(fields=["created_at"], name="cust_request_created_idx"),
         ]
 
+    def __str__(self) -> str:
+        return f"Request {self.pk} from customer {self.customer_id}"
 
-class OrderItem(models.Model):
-    company = models.ForeignKey(
-        "companies.Company",
-        on_delete=models.CASCADE,
-        related_name="order_items",
+
+class CustomerRequestLine(ProductLine):
+    """No price: nothing has been agreed yet. The rep prices the goods when the
+    Sales Invoice is written.
+    """
+
+    request = models.ForeignKey(
+        CustomerRequest, on_delete=models.CASCADE, related_name="lines"
     )
-    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="items")
-    product = models.ForeignKey(
-        "products.Product",
-        on_delete=models.PROTECT,
-        related_name="order_items",
-    )
-    unit = models.ForeignKey(
-        "common.UnitOfMeasure",
-        on_delete=models.PROTECT,
-        related_name="order_items",
-        help_text="Snapshot of Product.unit at line creation.",
-    )
-    quantity = models.DecimalField(max_digits=14, decimal_places=3)
-    unit_price = models.DecimalField(max_digits=12, decimal_places=2)
+    desired_quantity = models.DecimalField(max_digits=14, decimal_places=3)
 
     class Meta:
-        db_table = "order_item"
-        indexes = [
-            models.Index(fields=["company"], name="order_item_company_idx"),
-            models.Index(fields=["order"], name="order_item_order_idx"),
-        ]
-
-
-class StockMovement(models.Model):
-    """Append-only ledger. One row, one warehouse, signed quantity. Never UPDATE/DELETE."""
-
-    company = models.ForeignKey(
-        "companies.Company",
-        on_delete=models.CASCADE,
-        related_name="stock_movements",
-    )
-    warehouse = models.ForeignKey(
-        "products.Warehouse",
-        on_delete=models.PROTECT,
-        related_name="stock_movements",
-    )
-    product = models.ForeignKey(
-        "products.Product",
-        on_delete=models.PROTECT,
-        related_name="stock_movements",
-    )
-    quantity = models.DecimalField(
-        max_digits=14,
-        decimal_places=3,
-        help_text="Signed, in the product's UnitOfMeasure. Positive = inbound, negative = outbound.",
-    )
-    movement_type = models.CharField(max_length=32, choices=StockMovementType.choices)
-    order = models.ForeignKey(
-        Order,
-        on_delete=models.PROTECT,
-        null=True,
-        blank=True,
-        related_name="stock_movements",
-    )
-    invoice = models.ForeignKey(
-        "invoices.Invoice",
-        on_delete=models.PROTECT,
-        null=True,
-        blank=True,
-        related_name="stock_movements",
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        db_table = "stock_movement"
-        indexes = [
-            models.Index(fields=["company"], name="stock_movement_company_idx"),
-            models.Index(fields=["warehouse"], name="stock_movement_wh_idx"),
-            models.Index(
-                fields=["warehouse", "product"],
-                name="stock_movement_wh_prod_idx",
+        db_table = "customer_request_line"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["request", "product"],
+                name="customer_request_line_product_uniq",
             ),
-            models.Index(fields=["order"], name="stock_movement_order_idx"),
-            models.Index(fields=["created_at"], name="stock_movement_created_idx"),
         ]
+        indexes = [
+            models.Index(fields=["company"], name="cust_req_line_company_idx"),
+            models.Index(fields=["request"], name="cust_req_line_request_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.product_id} x {self.desired_quantity}"

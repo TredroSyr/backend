@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from rest_framework import status
 from rest_framework.response import Response
 
@@ -56,3 +58,15 @@ def error_response(
         response_data["errors"] = errors
     
     return Response(response_data, status=status_code)
+
+
+def decimal_string(value, places: int = 2) -> str:
+    """Render a monetary value as a fixed-precision string.
+
+    Serializer-backed money is already emitted as a string (DRF's
+    COERCE_DECIMAL_TO_STRING). Values assembled by hand — report aggregates, list
+    totals — bypass the serializer layer and would otherwise be encoded as JSON
+    floats, which both loses precision and forces clients to parse money two
+    different ways. Everything monetary goes through here instead.
+    """
+    return f"{Decimal(value or 0).quantize(Decimal(10) ** -places)}"

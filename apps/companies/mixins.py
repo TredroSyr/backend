@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from rest_framework import permissions
+from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
+
+from apps.common.models import AuditLog
+from apps.common.serializers import AuditLogSerializer
+from core.responses import success_response
 
 if TYPE_CHECKING:
     from django.db.models import QuerySet
@@ -122,3 +128,96 @@ class ModulePermissionMixin:
         """Override dispatch to check module permission."""
         self.check_module_permission()
         return super().dispatch(request, *args, **kwargs)
+
+
+class ModuleScopedViewMixin(TenantScopedViewMixin):
+    """Tenant scoping plus module permissions that follow the HTTP method.
+
+    Reading a document needs `can_view` on its module; changing one needs
+    `can_action`. Declaring the module once per viewset avoids the two attributes
+    drifting apart, and matches the invoicing spec's rule (§6.7) that every
+    document type is permissioned independently.
+    """
+
+    required_module: str = None
+
+    @property
+    def required_permission(self) -> str:
+        method = getattr(self.request, "method", "GET")
+        return "can_view" if method in permissions.SAFE_METHODS else "can_action"
+
+
+class PaginatedListMixin:
+    """Consistent, always-paginated list responses.
+
+    Invoice and payment lists grow without bound, so list endpoints page by
+    default rather than returning a whole table. The envelope matches the rest of
+    the API: `{success, message, data: {<key>: [...], pagination: {...}}}`.
+    """
+
+    #: Key the rows appear under in `data`.
+    list_key = "results"
+
+    def paginated_response(
+        self,
+        queryset,
+        *,
+        serializer_class=None,
+        key: str | None = None,
+        message: str = "",
+        extra: dict | None = None,
+    ):
+        serializer_class = serializer_class or self.get_serializer_class()
+        page = self.paginate_queryset(queryset)
+        rows = page if page is not None else queryset
+
+        serializer = serializer_class(
+            rows, many=True, context=self.get_serializer_context()
+        )
+        data = {key or self.list_key: serializer.data, **(extra or {})}
+
+        if page is not None:
+            paginator = self.paginator.page.paginator
+            data["pagination"] = {
+                "count": paginator.count,
+                "page": self.paginator.page.number,
+                "page_size": paginator.per_page,
+                "total_pages": paginator.num_pages,
+            }
+
+        return success_response(data=data, message=message)
+
+
+class CompanyContextMixin:
+    """Exposes the authenticated company and passes it to serializers.
+
+    Write serializers need the `Company` (not just its id) to scope product
+    lookups and resolve catalog prices. The authenticator already loaded it onto
+    the actor, so this costs no extra query.
+    """
+
+    @property
+    def company(self):
+        return self.request.user.company
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["company"] = self.company
+        return context
+
+
+class AuditHistoryMixin:
+    """`GET {detail}/history/` — the document's immutable trail (§6.4)."""
+
+    @action(detail=True, methods=["get"], url_path="history")
+    def history(self, request, *args, **kwargs):
+        document = self.get_object()
+        entries = AuditLog.objects.filter(
+            company_id=document.company_id,
+            entity_type=document._meta.db_table,
+            entity_id=document.pk,
+        ).order_by("-created_at", "-id")
+
+        return success_response(
+            data={"history": AuditLogSerializer(entries, many=True).data}
+        )

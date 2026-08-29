@@ -7,6 +7,8 @@ from rest_framework.exceptions import ErrorDetail
 from rest_framework.response import Response
 from rest_framework.views import exception_handler
 
+from core.domain import DomainError
+
 
 def custom_exception_handler(exc, context):
     """
@@ -19,6 +21,18 @@ def custom_exception_handler(exc, context):
         }
     }
     """
+    # Service-layer rule violations carry their own user-facing message and
+    # status; DRF's handler doesn't know about them.
+    if isinstance(exc, DomainError):
+        return Response(
+            {
+                "success": False,
+                "message": exc.message,
+                **({"errors": exc.errors} if exc.errors else {}),
+            },
+            status=exc.status_code,
+        )
+
     # Call REST framework's default exception handler first
     response = exception_handler(exc, context)
     

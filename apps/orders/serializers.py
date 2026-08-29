@@ -1,0 +1,244 @@
+"""Serializers for stock transfers and customer requests.
+
+Neither document carries money, so unlike the invoice serializers there is no
+price to resolve — lines are just a product and a quantity. Status is never
+writable: transitions go through `apps.orders.services.transfers`, which is what
+enforces the state machine and writes the audit trail.
+"""
+
+from __future__ import annotations
+
+from decimal import Decimal
+
+from rest_framework import serializers
+
+from apps.companies.models import Company
+from apps.orders.models import (
+    CustomerRequest,
+    CustomerRequestLine,
+    StockTransfer,
+    StockTransferLine,
+)
+from apps.products.models import Warehouse
+from apps.products.services.lookup import products_by_id
+
+QUANTITY_KWARGS = {"max_digits": 14, "decimal_places": 3, "min_value": Decimal("0.001")}
+
+
+class ProductLineReadSerializer(serializers.ModelSerializer):
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    product_sku = serializers.CharField(source="product.sku", read_only=True)
+    unit_name = serializers.CharField(source="unit.name", read_only=True)
+
+
+class QuantityLineWriteSerializer(serializers.Serializer):
+    product_id = serializers.IntegerField()
+    quantity = serializers.DecimalField(**QUANTITY_KWARGS)
+
+
+class ProductLinesWriteMixin:
+    """Resolves posted `(product_id, quantity)` pairs against the company catalog."""
+
+    sellable_only = False
+
+    def build_product_lines(self, lines_data: list[dict]):
+        company_id = self.context["company"].id
+        products = products_by_id(
+            company_id,
+            [line["product_id"] for line in lines_data],
+            sellable_only=self.sellable_only,
+        )
+        return [
+            (products[line["product_id"]], line["quantity"]) for line in lines_data
+        ]
+
+
+# ---------------------------------------------------------------------------
+# Stock transfers
+# ---------------------------------------------------------------------------
+
+
+class StockTransferLineSerializer(ProductLineReadSerializer):
+    effective_qty = serializers.DecimalField(
+        max_digits=14, decimal_places=3, read_only=True
+    )
+
+    class Meta:
+        model = StockTransferLine
+        fields = [
+            "id",
+            "product",
+            "product_name",
+            "product_sku",
+            "unit",
+            "unit_name",
+            "requested_qty",
+            "approved_qty",
+            "effective_qty",
+        ]
+        read_only_fields = fields
+
+
+class StockTransferSerializer(serializers.ModelSerializer):
+    rep_name = serializers.CharField(source="rep.name", read_only=True)
+    source_warehouse_name = serializers.CharField(
+        source="source_warehouse.name", read_only=True
+    )
+    destination_warehouse_name = serializers.CharField(
+        source="destination_warehouse.name", read_only=True
+    )
+
+    class Meta:
+        model = StockTransfer
+        fields = [
+            "id",
+            "number",
+            "rep",
+            "rep_name",
+            "source_warehouse",
+            "source_warehouse_name",
+            "destination_warehouse",
+            "destination_warehouse_name",
+            "status",
+            "requested_at",
+            "approved_at",
+            "received_at",
+            "cancelled_at",
+            "notes",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class StockTransferDetailSerializer(StockTransferSerializer):
+    lines = StockTransferLineSerializer(many=True, read_only=True)
+
+    class Meta(StockTransferSerializer.Meta):
+        fields = [*StockTransferSerializer.Meta.fields, "lines"]
+        read_only_fields = fields
+
+
+class StockTransferCreateSerializer(ProductLinesWriteMixin, serializers.Serializer):
+    """A rep asking the company for goods. Warehouses default to the company's
+    main warehouse and the rep's own, so the field client can omit both.
+    """
+
+    lines = QuantityLineWriteSerializer(many=True, allow_empty=False)
+    source_warehouse = serializers.PrimaryKeyRelatedField(
+        queryset=Warehouse.objects.all(), required=False, allow_null=True
+    )
+    destination_warehouse = serializers.PrimaryKeyRelatedField(
+        queryset=Warehouse.objects.all(), required=False, allow_null=True
+    )
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate(self, data):
+        data["product_lines"] = self.build_product_lines(data["lines"])
+        return data
+
+
+class StockTransferModifySerializer(serializers.Serializer):
+    """Admin cutting approved quantities. Lines not listed keep what was requested."""
+
+    lines = serializers.ListField(
+        child=serializers.DictField(), allow_empty=False
+    )
+
+    def validate_lines(self, value):
+        approved: dict[int, Decimal] = {}
+        for entry in value:
+            try:
+                line_id = int(entry["line_id"])
+                quantity = Decimal(str(entry["approved_qty"]))
+            except (KeyError, TypeError, ValueError, ArithmeticError):
+                raise serializers.ValidationError(
+                    "كل بند يجب أن يحتوي على line_id و approved_qty"
+                )
+            approved[line_id] = quantity
+        return approved
+
+
+# ---------------------------------------------------------------------------
+# Customer requests
+# ---------------------------------------------------------------------------
+
+
+class CustomerRequestLineSerializer(ProductLineReadSerializer):
+    class Meta:
+        model = CustomerRequestLine
+        fields = [
+            "id",
+            "product",
+            "product_name",
+            "product_sku",
+            "unit",
+            "unit_name",
+            "desired_quantity",
+        ]
+        read_only_fields = fields
+
+
+class CustomerRequestSerializer(serializers.ModelSerializer):
+    customer_name = serializers.CharField(source="customer.name", read_only=True)
+    customer_phone = serializers.CharField(source="customer.phone", read_only=True)
+    rep_name = serializers.CharField(
+        source="rep.name", read_only=True, allow_null=True
+    )
+    fulfilled_by_invoice_number = serializers.CharField(
+        source="fulfilled_by_invoice.number", read_only=True, allow_null=True
+    )
+
+    class Meta:
+        model = CustomerRequest
+        fields = [
+            "id",
+            "company",
+            "customer",
+            "customer_name",
+            "customer_phone",
+            "rep",
+            "rep_name",
+            "status",
+            "fulfilled_by_invoice",
+            "fulfilled_by_invoice_number",
+            "fulfilled_at",
+            "cancelled_at",
+            "notes",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class CustomerRequestDetailSerializer(CustomerRequestSerializer):
+    lines = CustomerRequestLineSerializer(many=True, read_only=True)
+
+    class Meta(CustomerRequestSerializer.Meta):
+        fields = [*CustomerRequestSerializer.Meta.fields, "lines"]
+        read_only_fields = fields
+
+
+class CustomerRequestCreateSerializer(ProductLinesWriteMixin, serializers.Serializer):
+    """Posted from the customer app. `company_id` names the company being browsed —
+    customers are global entities and are not bound to one tenant.
+    """
+
+    sellable_only = True
+
+    company_id = serializers.IntegerField()
+    lines = QuantityLineWriteSerializer(many=True, allow_empty=False)
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate_company_id(self, value):
+        company = Company.objects.filter(id=value, is_active=True).first()
+        if company is None:
+            raise serializers.ValidationError("الشركة غير موجودة أو غير نشطة")
+        # The browsing customer has no tenant of their own, so the company that
+        # scopes the product lookup comes from the payload, not from a JWT claim.
+        self.context["company"] = company
+        return value
+
+    def validate(self, data):
+        data["product_lines"] = self.build_product_lines(data["lines"])
+        return data

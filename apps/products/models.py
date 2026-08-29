@@ -3,6 +3,8 @@ from __future__ import annotations
 from django.db import models
 from django.db.models import Q
 
+from apps.common.models import DocumentType
+
 
 class WarehouseOwnerType(models.TextChoices):
     COMPANY = "company", "Company"
@@ -384,3 +386,138 @@ class CustomFieldValue(models.Model):
 
     def __str__(self) -> str:
         return f"{self.definition.key} = {self.value}"
+
+class ProductLine(models.Model):
+    """Abstract: a company-scoped reference to one product on a document line.
+
+    Every document line in the system — priced (invoice lines) or not (stock
+    transfer, customer request) — starts from this shape. `unit` is snapshotted
+    from `Product.unit` at line creation so historical documents stay readable if
+    a product's unit is changed later.
+    """
+
+    company = models.ForeignKey(
+        "companies.Company",
+        on_delete=models.CASCADE,
+        related_name="%(class)ss",
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.PROTECT,
+        related_name="%(class)ss",
+    )
+    unit = models.ForeignKey(
+        "common.UnitOfMeasure",
+        on_delete=models.PROTECT,
+        related_name="%(class)ss",
+        help_text="Snapshot of Product.unit at line creation.",
+    )
+
+    class Meta:
+        abstract = True
+
+
+# ---------------------------------------------------------------------------
+# Stock ledger
+#
+# Every warehouse quantity in the system is the sum of StockMovement rows for a
+# (warehouse, product) pair; ProductWarehouseStock.quantity above is a cached
+# projection of that sum, maintained by apps.products.services.stock.
+#
+# The ledger lives here rather than in a document app because both `invoices`
+# (incoming / sales / return) and `orders` (stock transfers) write to it. Source
+# documents are referenced by (source_type, source_id) instead of one nullable FK
+# per document type: that keeps this app dependency-free — nothing in `products`
+# imports `invoices` or `orders` — and adding a future document type is a data
+# concern, not a migration.
+# ---------------------------------------------------------------------------
+
+
+class StockMovementType(models.TextChoices):
+    """Why stock moved. Paired with the sign of `quantity`, never replacing it."""
+
+    INITIAL = "initial", "Initial stock"
+    INCOMING = "incoming", "Incoming invoice receipt"
+    TRANSFER_OUT = "transfer_out", "Stock transfer leaving the company warehouse"
+    TRANSFER_IN = "transfer_in", "Stock transfer entering the rep warehouse"
+    SALE_OUT = "sale_out", "Sales invoice leaving the rep warehouse"
+    RETURN_IN = "return_in", "Return received into a warehouse"
+    ADJUSTMENT = "adjustment", "Manual adjustment"
+
+
+MANUAL_STOCK_SOURCE = "manual"
+
+# Reuses the canonical DocumentType values so a movement's source_type always
+# matches the document numbering vocabulary (INV-IN, TRF, INV-SALE, INV-RET).
+STOCK_SOURCE_CHOICES = [
+    *DocumentType.choices,
+    (MANUAL_STOCK_SOURCE, "Manual adjustment"),
+]
+
+
+class StockMovement(models.Model):
+    """Append-only ledger. One row, one warehouse, signed quantity. Never UPDATE/DELETE.
+
+    A company -> rep transfer is two rows (one negative, one positive), so every
+    row stays scoped to a single warehouse.
+    """
+
+    company = models.ForeignKey(
+        "companies.Company",
+        on_delete=models.CASCADE,
+        related_name="stock_movements",
+    )
+    warehouse = models.ForeignKey(
+        Warehouse,
+        on_delete=models.PROTECT,
+        related_name="stock_movements",
+    )
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.PROTECT,
+        related_name="stock_movements",
+    )
+    quantity = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        help_text="Signed, in the product's UnitOfMeasure. Positive = inbound, negative = outbound.",
+    )
+    balance_after = models.DecimalField(
+        max_digits=14,
+        decimal_places=3,
+        help_text="Warehouse quantity for this product immediately after the movement.",
+    )
+    movement_type = models.CharField(max_length=32, choices=StockMovementType.choices)
+    source_type = models.CharField(max_length=32, choices=STOCK_SOURCE_CHOICES)
+    source_id = models.BigIntegerField(
+        null=True,
+        blank=True,
+        help_text="PK of the source document. Null only for manual adjustments.",
+    )
+    source_number = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text="Document number snapshot, so the ledger reads without joins.",
+    )
+    note = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "stock_movement"
+        indexes = [
+            models.Index(fields=["company"], name="stock_movement_company_idx"),
+            models.Index(fields=["warehouse"], name="stock_movement_wh_idx"),
+            models.Index(
+                fields=["warehouse", "product"],
+                name="stock_movement_wh_prod_idx",
+            ),
+            models.Index(
+                fields=["source_type", "source_id"],
+                name="stock_movement_source_idx",
+            ),
+            models.Index(fields=["created_at"], name="stock_movement_created_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.movement_type} {self.quantity} @ {self.warehouse_id}"

@@ -44,6 +44,11 @@ from apps.orders.models import (
 )
 from apps.products.models import StockMovementType, Warehouse, WarehouseOwnerType
 from apps.products.services.stock import StockChange, apply_stock_changes
+from apps.products.services.warehouses import (
+    default_company_warehouse,
+    default_rep_warehouse,
+    require_warehouse,
+)
 from core.domain import DomainError, InvalidTransition
 
 if TYPE_CHECKING:
@@ -53,44 +58,6 @@ if TYPE_CHECKING:
     from apps.reps.models import Rep
 
 ZERO = Decimal("0")
-
-
-def _company_warehouse(company_id: int) -> Warehouse:
-    """Default source warehouse when the rep's app doesn't name one."""
-    warehouse = (
-        Warehouse.objects.filter(
-            company_id=company_id,
-            owner_type=WarehouseOwnerType.COMPANY,
-            is_active=True,
-        )
-        .order_by("id")
-        .first()
-    )
-    if warehouse is None:
-        raise DomainError(
-            "لا يوجد مستودع نشط للشركة",
-            {"source_warehouse": ["The company has no active warehouse."]},
-        )
-    return warehouse
-
-
-def _rep_warehouse(company_id: int, rep_id: int) -> Warehouse:
-    warehouse = (
-        Warehouse.objects.filter(
-            company_id=company_id,
-            rep_id=rep_id,
-            owner_type=WarehouseOwnerType.REP,
-            is_active=True,
-        )
-        .order_by("id")
-        .first()
-    )
-    if warehouse is None:
-        raise DomainError(
-            "لا يوجد مستودع مرتبط بهذا المندوب",
-            {"destination_warehouse": ["The rep has no active warehouse."]},
-        )
-    return warehouse
 
 
 def _transition(
@@ -152,18 +119,26 @@ def create_stock_transfer(
             {"lines": ["Requested quantities must be positive."]},
         )
 
-    source = source_warehouse or _company_warehouse(company_id)
-    destination = destination_warehouse or _rep_warehouse(company_id, rep.id)
+    source = source_warehouse or default_company_warehouse(
+        company_id, field="source_warehouse"
+    )
+    destination = destination_warehouse or default_rep_warehouse(
+        company_id, rep.id, field="destination_warehouse"
+    )
 
-    if source.company_id != company_id or destination.company_id != company_id:
-        raise DomainError(
-            "المستودع لا ينتمي لهذه الشركة", {"warehouse": ["Wrong company."]}
-        )
-    if destination.rep_id != rep.id:
-        raise DomainError(
-            "مستودع الوجهة لا يخص هذا المندوب",
-            {"destination_warehouse": ["Destination is not this rep's warehouse."]},
-        )
+    require_warehouse(
+        source,
+        company_id=company_id,
+        owner_type=WarehouseOwnerType.COMPANY,
+        field="source_warehouse",
+    )
+    require_warehouse(
+        destination,
+        company_id=company_id,
+        owner_type=WarehouseOwnerType.REP,
+        rep_id=rep.id,
+        field="destination_warehouse",
+    )
 
     transfer = StockTransfer.objects.create(
         company_id=company_id,

@@ -54,14 +54,17 @@ from apps.invoices.services.balances import (
 from apps.invoices.services.credits import create_credit_from_return
 from apps.invoices.services.documents import (
     LineInput,
-    default_rep_warehouse,
     get_invoice_settings,
     persist_lines,
-    require_warehouse,
     stock_changes,
 )
 from apps.products.models import StockMovementType
 from apps.products.services.stock import apply_stock_changes
+from apps.products.services.warehouses import (
+    default_company_warehouse,
+    default_rep_warehouse,
+    require_warehouse,
+)
 from core.domain import DomainError, InvalidTransition
 
 if TYPE_CHECKING:
@@ -165,15 +168,21 @@ def create_return_invoice(
 ) -> ReturnInvoice:
     """Create the credit note as a draft. Nothing moves until it is issued.
 
-    `rep_id` defaults to the rep who made the sale; `warehouse` to that rep's own
-    warehouse, which an admin can override to pull defective goods out of
-    circulation.
+    `rep_id` defaults to the rep who made the sale — which is null when crediting
+    a company-direct sale, and the goods then default back to a company warehouse
+    instead of a van. An admin can override `warehouse` either way, to pull
+    defective goods out of circulation.
     """
     if not requested_lines:
         raise DomainError("لا يمكن إنشاء إرجاع بدون بنود", {"lines": ["No lines."]})
 
     rep_id = rep_id or sales_invoice.rep_id
-    warehouse = warehouse or default_rep_warehouse(company_id, rep_id)
+    if warehouse is None:
+        warehouse = (
+            default_rep_warehouse(company_id, rep_id)
+            if rep_id
+            else default_company_warehouse(company_id)
+        )
     require_warehouse(warehouse, company_id=company_id)
 
     lines = build_return_lines(sales_invoice, requested_lines)
@@ -188,6 +197,10 @@ def create_return_invoice(
         warehouse=warehouse,
         notes=notes,
         refund_method=refund_method,
+        # Inherited from the sale, not read off the company: `recompute_sales_invoice`
+        # subtracts this amount from that invoice's total, so the two must agree
+        # even if the company has switched currency since the sale.
+        currency=sales_invoice.currency,
         **settings.as_snapshot(),
     )
 
@@ -367,6 +380,12 @@ def _resolve_overage(
     invoice.
     """
     if return_invoice.refund_method == RefundMethod.CASH_REFUNDED_BY_REP:
+        # Crediting a company-direct sale: the refund came out of the company till,
+        # not a rep's float, so there is no rep settlement to correct. The sale is
+        # still closed at balance_due = 0 by the recompute above.
+        if return_invoice.rep_id is None:
+            return
+
         RepCashAdjustment.objects.create(
             company_id=return_invoice.company_id,
             rep_id=return_invoice.rep_id,

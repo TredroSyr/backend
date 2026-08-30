@@ -74,7 +74,13 @@ class InvoiceSettings(TimeStampedModel):
         return self.company_name or self.company.name
 
     def as_snapshot(self) -> dict[str, str]:
-        """Header fields copied onto a document at creation/issue time."""
+        """Header fields copied onto a document at creation/issue time.
+
+        `currency` is deliberately not here: these two strings are safe to
+        refresh when a draft is issued, but the denomination is not — the lines
+        were priced under it. Each document service pins `currency` once, at
+        creation.
+        """
         return {
             "company_name": self.display_company_name,
             "tax_registration_no": self.tax_registration_no,
@@ -141,6 +147,16 @@ class IncomingInvoice(TimeStampedModel):
     )
     company_name = models.CharField(max_length=255, blank=True, default="")
     tax_registration_no = models.CharField(max_length=64, blank=True, default="")
+    currency = models.CharField(
+        max_length=3,
+        blank=True,
+        default="",
+        help_text=(
+            "ISO 4217 code every money column on this document is denominated in. "
+            "Snapshotted at creation so a later change to Company.currency cannot "
+            "re-denominate a document that was already priced."
+        ),
+    )
     warehouse = models.ForeignKey(
         "products.Warehouse",
         on_delete=models.PROTECT,
@@ -227,7 +243,13 @@ class SalesInvoice(TimeStampedModel):
     rep = models.ForeignKey(
         "reps.Rep",
         on_delete=models.PROTECT,
+        null=True,
+        blank=True,
         related_name="sales_invoices",
+        help_text=(
+            "Null for a company-direct sale — a customer buying from the company "
+            "itself, with no rep involved. Set for the normal field sale."
+        ),
     )
     customer = models.ForeignKey(
         "customers.Customer",
@@ -238,10 +260,23 @@ class SalesInvoice(TimeStampedModel):
         "products.Warehouse",
         on_delete=models.PROTECT,
         related_name="sales_invoices",
-        help_text="Rep warehouse the goods leave from.",
+        help_text=(
+            "Warehouse the goods leave: the rep's van for a field sale, a company "
+            "warehouse for a direct sale."
+        ),
     )
     company_name = models.CharField(max_length=255, blank=True, default="")
     tax_registration_no = models.CharField(max_length=64, blank=True, default="")
+    currency = models.CharField(
+        max_length=3,
+        blank=True,
+        default="",
+        help_text=(
+            "ISO 4217 code every money column on this document is denominated in. "
+            "Snapshotted at creation so a later change to Company.currency cannot "
+            "re-denominate a document that was already priced."
+        ),
+    )
 
     total_amount = models.DecimalField(max_digits=14, decimal_places=2, default=MONEY_ZERO)
     paid_amount = models.DecimalField(
@@ -350,7 +385,13 @@ class ReturnInvoice(TimeStampedModel):
     rep = models.ForeignKey(
         "reps.Rep",
         on_delete=models.PROTECT,
+        null=True,
+        blank=True,
         related_name="return_invoices",
+        help_text=(
+            "Inherited from the sale being credited, so it is null when crediting "
+            "a company-direct sale."
+        ),
     )
     warehouse = models.ForeignKey(
         "products.Warehouse",
@@ -363,6 +404,16 @@ class ReturnInvoice(TimeStampedModel):
     )
     company_name = models.CharField(max_length=255, blank=True, default="")
     tax_registration_no = models.CharField(max_length=64, blank=True, default="")
+    currency = models.CharField(
+        max_length=3,
+        blank=True,
+        default="",
+        help_text=(
+            "ISO 4217 code every money column on this document is denominated in. "
+            "Snapshotted at creation so a later change to Company.currency cannot "
+            "re-denominate a document that was already priced."
+        ),
+    )
     status = models.CharField(
         max_length=16,
         choices=ReturnInvoiceStatus.choices,

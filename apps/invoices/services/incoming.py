@@ -27,11 +27,11 @@ from apps.invoices.services.documents import (
     LineInput,
     get_invoice_settings,
     persist_lines,
-    require_warehouse,
     stock_changes,
 )
 from apps.products.models import StockMovementType, WarehouseOwnerType
 from apps.products.services.stock import apply_stock_changes
+from apps.products.services.warehouses import require_warehouse
 from core.domain import DomainError, InvalidTransition
 
 if TYPE_CHECKING:
@@ -68,6 +68,7 @@ def create_incoming_invoice(
         warehouse=warehouse,
         notes=notes,
         created_by_id=created_by_id,
+        currency=settings.company.currency,
         **settings.as_snapshot(),
     )
 

@@ -30,16 +30,19 @@ from apps.invoices.services.balances import recompute_sales_invoice
 from apps.invoices.services.credits import apply_credits, lock_credits
 from apps.invoices.services.documents import (
     LineInput,
-    default_rep_warehouse,
     get_invoice_settings,
     persist_lines,
-    require_warehouse,
     stock_changes,
 )
 from apps.invoices.services.payments import add_payment
 from apps.orders.services.requests import fulfil_requests
 from apps.products.models import StockMovementType, WarehouseOwnerType
 from apps.products.services.stock import apply_stock_changes
+from apps.products.services.warehouses import (
+    default_company_warehouse,
+    default_rep_warehouse,
+    require_warehouse,
+)
 from core.domain import DomainError
 
 if TYPE_CHECKING:
@@ -56,9 +59,9 @@ if TYPE_CHECKING:
 def create_sales_invoice(
     *,
     company_id: int,
-    rep: Rep,
     customer: Customer,
     lines: Sequence[LineInput],
+    rep: Rep | None = None,
     warehouse: Warehouse | None = None,
     date: datetime | None = None,
     notes: str = "",
@@ -68,23 +71,39 @@ def create_sales_invoice(
     fulfils_request_ids: Sequence[int] = (),
     request: Request | None = None,
 ) -> SalesInvoice:
-    """Write the sale, deduct the rep's van, and settle whatever was paid on the spot.
+    """Write the sale, deduct the goods, and settle whatever was paid on the spot.
 
-    `warehouse` defaults to the rep's own warehouse — the field client does not
-    have to know warehouse ids. `credit_ids` and `payment_amount` are optional:
-    an invoice with neither is simply `deferred`, which is a supported outcome,
-    not an error. There is no credit limit (§1).
+    Two shapes of sale, distinguished only by whether `rep` is given:
+
+    * **Field sale** (`rep` set) — the spec's normal case. Goods leave that rep's
+      own van, and cash collected counts toward their settlement.
+    * **Company-direct sale** (`rep` omitted) — a customer buying from the company
+      itself, with no rep involved. Goods leave a company warehouse and the money
+      is company cash, so it stays out of every rep's reconciliation.
+
+    Either way `warehouse` defaults sensibly, so no client needs to know warehouse
+    ids. `credit_ids` and `payment_amount` are optional: an invoice with neither is
+    simply `deferred`, which is a supported outcome, not an error. There is no
+    credit limit (§1).
     """
     if not lines:
         raise DomainError("لا يمكن إنشاء فاتورة بدون بنود", {"lines": ["No lines."]})
 
-    warehouse = warehouse or default_rep_warehouse(company_id, rep.id)
-    require_warehouse(
-        warehouse,
-        company_id=company_id,
-        owner_type=WarehouseOwnerType.REP,
-        rep_id=rep.id,
-    )
+    if rep is not None:
+        warehouse = warehouse or default_rep_warehouse(company_id, rep.id)
+        require_warehouse(
+            warehouse,
+            company_id=company_id,
+            owner_type=WarehouseOwnerType.REP,
+            rep_id=rep.id,
+        )
+    else:
+        warehouse = warehouse or default_company_warehouse(company_id)
+        require_warehouse(
+            warehouse,
+            company_id=company_id,
+            owner_type=WarehouseOwnerType.COMPANY,
+        )
 
     settings = get_invoice_settings(company_id)
     invoice = SalesInvoice.objects.create(
@@ -95,6 +114,7 @@ def create_sales_invoice(
         customer=customer,
         warehouse=warehouse,
         notes=notes,
+        currency=settings.company.currency,
         **settings.as_snapshot(),
     )
 
@@ -131,7 +151,9 @@ def create_sales_invoice(
         add_payment(
             invoice,
             amount=payment_amount,
-            collected_by_id=rep.id,
+            # Null on a direct sale: the money went into the company till, not a
+            # rep's float, so it must not appear in anyone's cash settlement.
+            collected_by_id=rep.id if rep is not None else None,
             collected_at=payment_collected_at or invoice.date,
             request=request,
         )

@@ -210,6 +210,7 @@ class IncomingInvoiceSerializer(serializers.ModelSerializer):
             "supplier_ref",
             "company_name",
             "tax_registration_no",
+            "currency",
             "warehouse",
             "warehouse_name",
             "status",
@@ -250,7 +251,9 @@ class IncomingInvoiceCreateSerializer(LinesWriteMixin, serializers.Serializer):
 
 
 class SalesInvoiceSerializer(serializers.ModelSerializer):
-    rep_name = serializers.CharField(source="rep.name", read_only=True)
+    # allow_null keeps the key present as null on a company-direct sale; without
+    # it DRF drops the field entirely when `rep` is None.
+    rep_name = serializers.CharField(source="rep.name", read_only=True, allow_null=True)
     customer_name = serializers.CharField(source="customer.name", read_only=True)
     customer_phone = serializers.CharField(source="customer.phone", read_only=True)
     overage_amount = serializers.DecimalField(
@@ -271,6 +274,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             "warehouse",
             "company_name",
             "tax_registration_no",
+            "currency",
             "total_amount",
             "paid_amount",
             "returned_amount",
@@ -357,7 +361,7 @@ class ReturnInvoiceSerializer(serializers.ModelSerializer):
     sales_invoice_number = serializers.CharField(
         source="sales_invoice.number", read_only=True
     )
-    rep_name = serializers.CharField(source="rep.name", read_only=True)
+    rep_name = serializers.CharField(source="rep.name", read_only=True, allow_null=True)
     warehouse_name = serializers.CharField(source="warehouse.name", read_only=True)
 
     class Meta:
@@ -374,6 +378,7 @@ class ReturnInvoiceSerializer(serializers.ModelSerializer):
             "warehouse_name",
             "company_name",
             "tax_registration_no",
+            "currency",
             "status",
             "amount",
             "overage_amount",
@@ -513,3 +518,22 @@ class PendingCustomerCreditSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = fields
+
+
+class AdminSalesInvoiceCreateSerializer(SalesInvoiceCreateSerializer):
+    """Company-side sale creation.
+
+    `rep` is optional and decides which kind of sale this is:
+
+    * omitted -> a company-direct sale (a walk-in, or a customer buying from the
+      company itself). Stock leaves a company warehouse and no rep is attributed.
+    * supplied -> the sale is recorded on that rep's behalf and leaves their van,
+      exactly as if they had posted it from the field app.
+
+    `warehouse` still defaults correctly in both cases, so it only needs sending
+    when the company has more than one warehouse and the goods left a specific one.
+    """
+
+    rep = CompanyScopedPrimaryKeyRelatedField(
+        queryset=Rep.objects.all(), required=False, allow_null=True
+    )

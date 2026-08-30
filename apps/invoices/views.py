@@ -51,6 +51,7 @@ from apps.invoices.models import (
     SalesInvoiceLine,
 )
 from apps.invoices.serializers import (
+    AdminSalesInvoiceCreateSerializer,
     IncomingInvoiceCreateSerializer,
     IncomingInvoiceDetailSerializer,
     IncomingInvoiceSerializer,
@@ -298,11 +299,15 @@ class SalesInvoiceFilterMixin:
 
 
 class SalesInvoiceViewSet(SalesInvoiceFilterMixin, AdminDocumentViewSet):
-    """`/api/companies/sales-invoices/` — read-only for admins.
+    """`/api/companies/sales-invoices/`
 
-    Sales invoices are written in the field by the rep who delivered (§2), so
-    there is no admin create here. Admins can still record a payment against one,
-    which is the case where a customer settles at the office rather than on a visit.
+    Most sales are written in the field by the rep who delivered (§2), but a
+    customer can also buy directly from the company — a walk-in collecting from
+    the warehouse, with no rep involved. `POST` here covers that: omit `rep` for a
+    direct sale, or supply one to record a sale on that rep's behalf.
+
+    Admins can also record a payment against any invoice, for a customer settling
+    at the office rather than on a visit.
 
     Filters: `status`, `rep`, `customer`, `outstanding=true`, `date_from`,
     `date_to`, `search`.
@@ -314,10 +319,44 @@ class SalesInvoiceViewSet(SalesInvoiceFilterMixin, AdminDocumentViewSet):
     detail_key = "invoice"
 
     def get_serializer_class(self):
+        if self.action == "create":
+            return AdminSalesInvoiceCreateSerializer
         return (
             SalesInvoiceSerializer
             if self.action == "list"
             else SalesInvoiceDetailSerializer
+        )
+
+    def create(self, request, *args, **kwargs):
+        """Create a company-direct sale, or record one on a rep's behalf.
+
+        Same service call as the rep app, so the stock deduction, credit
+        application, payment and audit trail behave identically — only the
+        warehouse and the rep attribution differ.
+        """
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        invoice = sales_service.create_sales_invoice(
+            company_id=self.company.id,
+            rep=data.get("rep"),
+            customer=data["customer"],
+            lines=data["line_inputs"],
+            warehouse=data.get("warehouse"),
+            date=data.get("date"),
+            notes=data.get("notes", ""),
+            credit_ids=data.get("credit_ids", []),
+            payment_amount=data.get("payment_amount"),
+            payment_collected_at=data.get("payment_collected_at"),
+            fulfils_request_ids=data.get("fulfils_request_ids", []),
+            request=request,
+        )
+
+        return success_response(
+            data={"invoice": SalesInvoiceDetailSerializer(invoice).data},
+            message="تم إنشاء فاتورة المبيعات بنجاح",
+            status_code=status.HTTP_201_CREATED,
         )
 
     def get_queryset(self):

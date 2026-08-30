@@ -2,13 +2,18 @@
 
 Fourth companion to [frontend.md](frontend.md), [frontend2.md](frontend2.md) and
 [frontend3.md](frontend3.md). Those describe the invoicing module document by
-document. This one is a **flow document**: it follows one journey end to end — a
-rep asks the company for goods, the office responds, the goods physically move,
-and the rep sells them to a customer.
+document. This one is a **flow document**: it follows one journey end to end —
+goods leave the company warehouse, land in a rep's van, and are sold to a
+customer.
 
-Nothing here is a new endpoint. It is the existing surface arranged in the order
-a client actually calls it, with the rules that only become visible when you look
-at the whole sequence.
+That journey has **two origins**. Either the rep asks for the goods, or the
+office sends them unasked. They are the same document, the same ledger and the
+same receipt; only the opening move differs, and they converge before anything
+physically moves.
+
+Everything here except the dispatch endpoint in §6d already existed. The rest is
+the existing surface arranged in the order a client actually calls it, with the
+rules that only become visible when you look at the whole sequence.
 
 > Conventions — base URL, JWT auth, the `{success, message, data}` envelope,
 > pagination, idempotency and error shapes — are unchanged. See frontend.md §2–§6.
@@ -22,42 +27,48 @@ at the whole sequence.
   │  POST /api/companies/reps/  →  van warehouse auto-created │
   └───────────────────────────────────────────────────────────┘
                               │
-                              ▼
-  rep signs in, browses the catalog, asks for goods
-  POST /api/reps/stock-transfers/                    status: pending
-                              │
-            ┌─────────────────┴──────────────────┐
-            │                                    │
-   admin approves as-is                 admin cuts quantities
-   POST /companies/…/approve/           POST /companies/…/modify/
-            │                                    │
-            │                          modified_by_admin
-            │                                    ▼
-            │                        pending_rep_confirmation
-            │                          │                  │
-            │                 rep confirms          rep rejects
-            │                 POST /reps/…/confirm/  POST /reps/…/reject/
-            │                          │                  │
-            └──────────┬───────────────┘             cancelled
-                       ▼
-                   confirmed         ← goods agreed, nothing has moved
-                       │
-                       ▼
-   rep collects the goods and taps "received"
-   POST /api/reps/stock-transfers/{id}/receive/      status: received
-                       │
-                       ▼        ◄─── THE ONLY STOCK MOVEMENT IN THIS FLOW
-        company warehouse −qty, rep van +qty
-                       │
-                       ▼
-   rep visits the customer and sells
-   POST /api/reps/sales-invoices/                    van −qty, cash in
+     ORIGIN A: the rep asks   │   ORIGIN B: the office sends
+     ┌────────────────────────┴────────────────────────┐
+     ▼                                                 ▼
+  POST /api/reps/stock-transfers/      POST /api/companies/stock-transfers/
+              status: pending                    status: confirmed
+                     │                                 │
+        ┌────────────┴─────────────┐                   │
+        │                          │                   │
+  admin approves as-is    admin cuts quantities        │
+  POST /companies/…/approve/   POST /companies/…/modify/
+        │                          │                   │
+        │                 modified_by_admin            │
+        │                          ▼                   │
+        │               pending_rep_confirmation       │
+        │                  │                │          │
+        │         rep confirms        rep rejects      │
+        │    POST /reps/…/confirm/  POST /reps/…/reject/
+        │                  │                │          │
+        └────────┬─────────┘           cancelled       │
+                 │                                     │
+                 └──────────────┬──────────────────────┘
+                                ▼
+                            confirmed    ← agreed, nothing has moved
+                                │
+                                ▼
+        rep collects the goods and taps "received"
+        POST /api/reps/stock-transfers/{id}/receive/   status: received
+                                │
+                                ▼   ◄─── THE ONLY STOCK MOVEMENT IN THIS FLOW
+             company warehouse −qty, rep van +qty
+                                │
+                                ▼
+        rep visits the customer and sells
+        POST /api/reps/sales-invoices/                 van −qty, cash in
 ```
 
 **The one rule that governs everything below: stock moves on `received`, and
-nowhere else.** Approving does not move stock. Confirming does not move stock. A
-transfer sitting at `confirmed` for a week has not changed a single quantity in
-any warehouse. If your UI implies otherwise, it is lying to the rep.
+nowhere else.** Approving does not move stock. Confirming does not move stock.
+**Neither does dispatching** — the office cannot put goods in a van by decree,
+because a van's contents are what the rep is accountable for. A transfer sitting
+at `confirmed` for a week has not changed a single quantity in any warehouse. If
+your UI implies otherwise, it is lying to the rep.
 
 ### Every endpoint in this flow
 
@@ -66,7 +77,8 @@ any warehouse. If your UI implies otherwise, it is lying to the rep.
 | 1 | Admin | `POST /api/companies/reps/` | Creates the rep **and their van** |
 | 2 | Rep | `POST /api/auth/rep/signin` | Token carrying `rep_id` + `company_id` |
 | 3 | Rep | `GET /api/companies/products/` | Browse what can be requested |
-| 4 | Rep | `POST /api/reps/stock-transfers/` | Raise the request → `pending` |
+| 4 | Rep | `POST /api/reps/stock-transfers/` | **Origin A** — raise a request → `pending` |
+| 4′ | Admin | `POST /api/companies/stock-transfers/` | **Origin B** — dispatch → `confirmed` |
 | 5 | Admin | `GET /api/companies/stock-transfers/?status=pending` | The review queue |
 | 6a | Admin | `POST /api/companies/stock-transfers/{id}/approve/` | → `confirmed` |
 | 6b | Admin | `POST /api/companies/stock-transfers/{id}/modify/` | → `pending_rep_confirmation` |
@@ -77,9 +89,11 @@ any warehouse. If your UI implies otherwise, it is lying to the rep.
 | 9 | Rep | `GET /api/companies/warehouses/{van_id}/product-stock/` | What is in the van |
 | 10 | Rep | `POST /api/reps/sales-invoices/` | The sale, deducts from the van |
 
+Steps 5–7 exist only for Origin A. A dispatch skips straight from 4′ to 8.
+
 ---
 
-# Part A — Before anything can be requested
+# Part A — Before anything can move
 
 ## 1. The rep needs a van
 
@@ -190,16 +204,24 @@ after the rep has typed the whole invoice.
 
 ## 4. The state machine
 
-Six states. The server rejects any hop not in this table, whichever endpoint asks:
+Six states and **two entry points**. The server rejects any hop not in this table,
+whichever endpoint asks:
 
 | From | Allowed next | Who triggers it |
 |---|---|---|
+| *(new — rep request)* | `pending` | Rep |
+| *(new — office dispatch)* | `confirmed` | Admin |
 | `pending` | `confirmed`, `modified_by_admin`, `cancelled` | Admin |
 | `modified_by_admin` | `pending_rep_confirmation`, `cancelled` | *Automatic* |
 | `pending_rep_confirmation` | `confirmed`, `cancelled` | Rep |
 | `confirmed` | `received`, `cancelled` | Rep receives; either side cancels |
 | `received` | — terminal | — |
 | `cancelled` | — terminal | — |
+
+A dispatch enters at `confirmed` because there is nobody left to approve: the
+office asked and answered in one act. **Past that point the two origins are
+indistinguishable** — the same `receive`, the same cancel rules, the same
+document shape. Only the audit trail records which one it was.
 
 `modified_by_admin` is a **pass-through state you will almost never see.** One
 `modify` call writes both hops in a single transaction, so the transfer is
@@ -231,8 +253,12 @@ rep taps *receive* while the admin is cancelling.
 | `received` | In your van. Sellable. |
 | `cancelled` | Dead. Raise a new one. |
 
-Only `pending_rep_confirmation` needs a badge or a push — it is the one state
-where the transfer is blocked on the rep and nobody else can unblock it.
+Two states are blocked on the rep and cannot be unblocked by anyone else, so
+those are the two that deserve a badge: `pending_rep_confirmation`, and
+`confirmed` — which now includes goods the office sent unprompted and is waiting
+for the rep to collect. A dispatched transfer appears in the rep's list already
+at `confirmed` and never passes through `pending`, so a screen that only watches
+`pending_rep_confirmation` will show the rep nothing at all.
 
 ## 5. Raising a request — the rep
 
@@ -289,11 +315,15 @@ rows instead of failing the whole form anonymously.
 something the company holds 3 of. The request is a request; availability is the
 admin's problem at approval time, and the hard check happens at receipt (§8).
 
-## 6. The office responds — the admin
+## 6. The office acts — the admin
 
-All three actions live on `/api/companies/stock-transfers/{id}/`, take an **empty
-body** except `modify`, return the updated detail object, and require the
-`stock_transfers` module with `can_action`. Listing needs `can_view`.
+Everything in this section requires the `stock_transfers` module with
+`can_action`; listing needs `can_view`.
+
+The three **responses** to a rep's request (6a–6c) live on
+`/api/companies/stock-transfers/{id}/`, take an **empty body** except `modify`,
+and return the updated detail object. The fourth (6d) is a `POST` to the
+collection and starts a transfer of the office's own.
 
 ### The review queue
 
@@ -363,6 +393,125 @@ Cancelling a `confirmed` transfer is legitimate and safe — no stock has moved,
 there is nothing to reverse. But if the rep already physically collected the
 goods, the paperwork now disagrees with the van. Warn on this one.
 
+### 6d. Dispatch — sending goods nobody asked for
+
+```
+POST /api/companies/stock-transfers/
+```
+
+For the van loaded overnight, the promotion pushed to the whole team, the stock
+the office decides a rep should be carrying. Same body as a rep's request (§5),
+plus the rep being sent to:
+
+```json
+{
+  "rep": 3,
+  "lines": [
+    { "product_id": 1, "quantity": "10" },
+    { "product_id": 2, "quantity": "5.5" }
+  ],
+  "notes": "تحميل ليلي"
+}
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `rep` | ✅ | Must be **active and in your company** |
+| `lines[].product_id` | ✅ | Same rules as §5 — `is_active`, not necessarily sellable |
+| `lines[].quantity` | ✅ | Decimal, 3 dp, minimum `0.001` |
+| `source_warehouse` | — | Defaults to the company's oldest active warehouse |
+| `destination_warehouse` | — | Defaults to **that rep's** oldest active van |
+| `notes` | — | Free text |
+
+Returns **201** with the same detail object as everything else, at `confirmed`:
+
+```json
+{
+  "id": 7,
+  "number": "TRF-00007",
+  "status": "confirmed",
+  "rep": 3,
+  "rep_name": "Kamal",
+  "requested_at": "2026-08-30T05:40:00Z",
+  "approved_at": "2026-08-30T05:40:00Z",
+  "received_at": null,
+  "lines": [
+    {
+      "id": 12,
+      "product": 1,
+      "product_name": "زيت دوار الشمس 1ل",
+      "requested_qty": "10.000",
+      "approved_qty": "10.000",
+      "effective_qty": "10.000"
+    }
+  ]
+}
+```
+
+Message: `تم إرسال البضاعة بانتظار استلام المندوب`.
+
+Four things to read off that response:
+
+- **`approved_qty` is already filled.** There is no proposal stage; the office
+  set the quantity, so requested and approved are the same number from birth.
+- **`requested_at` and `approved_at` are both set, to the same instant.** Do not
+  render "requested by the rep at…" off `requested_at` without checking the
+  origin — on a dispatch nobody requested anything. See below for how to tell.
+- **`status` is `confirmed`, never `pending`.** It will not appear in a
+  `?status=pending` review queue, which is correct: there is nothing to review.
+- **No `Idempotency-Key`.** Unlike the rep's three field writes, this endpoint is
+  not idempotent — it follows the same pattern as the other admin document
+  creates. A double-submitted form is two transfers. Disable the button.
+
+#### Telling the two origins apart
+
+The document itself does not say which origin it came from. Two reliable tests,
+in order of convenience:
+
+1. **`status` on arrival.** A transfer that has ever been `pending` was
+   rep-raised. In practice: if you see it at `confirmed` and it has no `pending`
+   history, it was dispatched.
+2. **The audit trail** (§11) is authoritative. A dispatch opens with the action
+   `dispatched`; a request opens with `requested`. The two never both appear.
+
+If the origin matters to your UI — and on a rep's list it does, because "your
+request was approved" and "the office is sending you goods" are different
+sentences — read the notification event key instead (§13), which is distinct per
+origin and does not cost an extra call.
+
+#### What the rep can do about it
+
+Exactly what they could do with a transfer they raised themselves:
+
+- **Receive it** — `POST /api/reps/stock-transfers/{id}/receive/`, §8. No special
+  case, no new endpoint, and it is where the stock finally moves.
+- **Refuse it** — `POST /api/reps/stock-transfers/{id}/reject/`. `confirmed →
+  cancelled` was already a legal hop, so a rep who will not carry the goods can
+  decline. Worth exposing: goods the rep never asked for are exactly the goods
+  they might not want.
+
+What nobody can do is approve or modify it again. Both return **409** on a
+dispatched transfer, because it opened past the point where those apply. If your
+dashboard renders action buttons off status rather than origin, this needs no
+special handling — `confirmed` already hides them.
+
+#### Errors
+
+| Condition | Status | Body |
+|---|---|---|
+| Unknown, inactive, or other company's rep | 400 | `errors.rep` — `المندوب غير موجود أو غير نشط` |
+| Empty `lines` | 400 | `لا يمكن إرسال طلب فارغ` |
+| Unknown / inactive product | 400 | `بعض المنتجات غير موجودة أو غير متاحة` |
+| That rep has no van | 400 | `لا يوجد مستودع مرتبط بهذا المندوب` |
+| `destination_warehouse` is another rep's van | 400 | `المستودع لا يخص هذا المندوب` |
+| Caller is a rep, not a subuser | 403 | — |
+
+A rep id from another company fails as "not found" rather than "forbidden" — the
+lookup is scoped to your company, so cross-tenant ids simply do not resolve.
+
+**There is still no stock check here**, exactly as in §5. The office can dispatch
+more than the warehouse holds; it fails at receipt (§8), not at dispatch.
+
 ## 7. The rep responds to a modification
 
 ```
@@ -429,6 +578,10 @@ Idempotency-Key: <uuid>
 Empty body. Legal only from `confirmed`. In one transaction it writes a
 `transfer_out` movement against the company warehouse, a `transfer_in` against
 the van, sets `received_at`, and moves the status to `received`.
+
+**Identical for both origins.** A dispatched transfer is received through this
+same call, with no flag and no variant — which is the point of having the office
+enter the machine at `confirmed` rather than inventing a second path.
 
 Lines with `effective_qty` of `0` are skipped. If **every** line is zero — an
 admin approved nothing — the call fails with `لا توجد كميات معتمدة لاستلامها`
@@ -604,11 +757,16 @@ See frontend.md §3.4 for the response object, status derivation
 GET /api/companies/stock-transfers/{id}/history/
 ```
 
-Every transition — `requested`, `approved`, `modified`,
+Every transition — `requested`, `dispatched`, `approved`, `modified`,
 `awaiting_rep_confirmation`, `rep_confirmed`, `rep_rejected`, `cancelled`,
 `received` — with `actor_type`, `actor_id`, `from_status`, `to_status`, a
 `changes` object and a timestamp. `modified` carries the per-line before/after in
 `changes.modified_lines`, and it is the **only** place `approved_by` is visible.
+
+The first entry names the origin and is the authoritative test for it:
+`requested` for a rep's own, `dispatched` for the office's. A dispatched
+transfer's trail is short — `["dispatched", "received"]` — because there was
+never an approval step to record.
 
 There is no `/history/` on `/api/reps/stock-transfers/{id}/`. A rep-facing
 timeline has to be built from the four timestamps on the document itself
@@ -642,23 +800,37 @@ assigned to them at `/api/reps/customer-requests/`.
 ## 13. Notifications are written, but there is no API to read them
 
 Every step in Part B writes `Notification` rows — `stock_transfer.requested`,
-`.modified`, `.confirmed`, `.received`, `.cancelled`, each with Arabic title and
-body copy, plus `stock_transfer_id` and `number` in the payload.
+`.dispatched`, `.modified`, `.confirmed`, `.received`, `.cancelled`, each with
+Arabic title and body copy, plus `stock_transfer_id` and `number` in the payload.
+
+`.dispatched` is deliberately distinct from `.confirmed`: one tells a rep the
+office is sending goods they never asked for
+(`بضاعة بانتظارك في المستودع`), the other tells them their own request was
+approved (`طلب البضاعة جاهز للاستلام`). Both leave the transfer at `confirmed`,
+so the event key is the cheapest way to render the right sentence.
 
 **The notifications app exposes no URLs.** There is no list endpoint, no unread
 count, no mark-as-read, and no push delivery. The rows accumulate server-side and
 nothing can currently fetch them.
 
-So the badge on the rep's transfer list has to come from polling
-`GET /api/reps/stock-transfers/?status=pending_rep_confirmation` and counting the
-result. Build it that way now; it will keep working when a notifications endpoint
-lands. Do not design a screen around a notification feed that does not exist.
+So the badge on the rep's transfer list has to come from polling and counting.
+Poll **both** states that wait on the rep, or a dispatch will arrive silently:
+
+```
+GET /api/reps/stock-transfers/?status=pending_rep_confirmation
+GET /api/reps/stock-transfers/?status=confirmed
+```
+
+Build it that way now; it will keep working when a notifications endpoint lands.
+Do not design a screen around a notification feed that does not exist.
 
 ## 14. There is no way back to the depot
 
 Transfers are strictly one-directional. `source_warehouse` must be
 `owner_type: "company"` and `destination_warehouse` must be the rep's van — both
-enforced, and there is no `direction` field.
+enforced, and there is no `direction` field. **The dispatch endpoint does not
+change this**: it lets the office *start* a transfer, not reverse one. Both
+origins move goods company → van.
 
 Return invoices do not fill the gap either: when a rep is on the return, the
 goods default **back into the rep's van**, because the normal case is a customer
@@ -675,10 +847,15 @@ new endpoint.
 
 | Surface | Guard |
 |---|---|
-| `/api/companies/stock-transfers/` | `stock_transfers` — `can_view` to read, `can_action` to approve/modify/cancel |
+| `/api/companies/stock-transfers/` | `stock_transfers` — `can_view` to read, `can_action` to dispatch/approve/modify/cancel |
 | `/api/companies/customer-requests/` | `customer_requests` — read-only |
 | `/api/companies/products/`, `/warehouses/` | Authentication only, scoped by the token's company |
 | `/api/reps/...` | `IsRep`, scoped to `rep_id` from the token |
+
+Dispatching is `can_action` on `stock_transfers`, the same grant that already
+allows approving and cancelling. A role that could approve a rep's request can
+now also send goods unprompted — if that distinction matters to you, it needs a
+new module rather than a client-side check.
 
 Reps and customers hold **no** module permissions — the permission check returns
 false for any actor that is not a subuser, so the `/api/companies/stock-transfers/`
@@ -716,7 +893,12 @@ company — but within it, they see the whole catalog and every warehouse.
 - [ ] Treat 409 on receive as "refetch and re-render", not as an error toast.
 - [ ] Render `effective_qty`, not `requested_qty`, everywhere except the
       "what the office changed" comparison.
-- [ ] Badge `pending_rep_confirmation` by polling — no notification API exists.
+- [ ] Badge **both** `pending_rep_confirmation` and `confirmed` by polling — no
+      notification API exists, and a dispatch arrives straight at `confirmed`.
+- [ ] Do not assume a transfer in the rep's list was raised by the rep. Label a
+      dispatch "the office is sending you goods", not "your request was approved".
+- [ ] Expose `reject` on a dispatched transfer too — goods the rep never asked
+      for are the goods they are most likely to refuse.
 - [ ] Match the van by `rep === own rep_id`; `?owner_type=rep` returns everyone's.
 - [ ] Surface `available` vs `requested` on an insufficient-stock error, with a
       real next step ("ask the office to cancel and re-request").
@@ -734,12 +916,21 @@ company — but within it, they see the whole catalog and every warehouse.
 - [ ] Gate the whole screen on `stock_transfers`, and the action buttons on
       `can_action`.
 - [ ] Use `/history/` for the "who approved this" question — it is not on the
-      document.
+      document. Its first entry (`requested` vs `dispatched`) is also the
+      authoritative origin test.
 - [ ] Remember `search` on the transfer list matches the number only.
+- [ ] Disable the submit button on dispatch — that endpoint is **not**
+      idempotent, so a double submit is two transfers.
+- [ ] Do not offer approve/modify on a dispatched transfer; both 409 from
+      `confirmed`.
+- [ ] Expect a dispatch never to appear in the `?status=pending` review queue.
 
 **Both**
 
-- [ ] Never imply stock has moved before `received`.
+- [ ] Never imply stock has moved before `received` — dispatching is not
+      delivering.
+- [ ] Treat `confirmed` as reachable from two directions, and never assume a
+      transfer passed through `pending`.
 - [ ] Handle `modified_by_admin` as a state even though you will rarely see it.
 - [ ] Keep quantities and money as strings end to end.
 - [ ] Do not assume `data.pagination` exists — product, warehouse and stock lists

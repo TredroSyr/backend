@@ -27,6 +27,10 @@ if TYPE_CHECKING:
 # and the sale only happens when the rep visits.
 CUSTOMER_REQUEST_CREATED = "customer_request.created"
 STOCK_TRANSFER_REQUESTED = "stock_transfer.requested"
+# Sent to the rep when the office starts the transfer itself. Distinct from
+# `.confirmed` on purpose: the rep is being told about goods they never asked
+# for, which reads as news rather than as an answer.
+STOCK_TRANSFER_DISPATCHED = "stock_transfer.dispatched"
 STOCK_TRANSFER_MODIFIED = "stock_transfer.modified"
 STOCK_TRANSFER_CONFIRMED = "stock_transfer.confirmed"
 STOCK_TRANSFER_RECEIVED = "stock_transfer.received"
@@ -40,6 +44,10 @@ EVENT_COPY: dict[str, dict[str, str]] = {
     STOCK_TRANSFER_REQUESTED: {
         "title": "طلب بضاعة جديد",
         "body": "قام أحد المندوبين بطلب بضاعة من المستودع.",
+    },
+    STOCK_TRANSFER_DISPATCHED: {
+        "title": "بضاعة بانتظارك في المستودع",
+        "body": "أرسلت لك الإدارة بضاعة جاهزة للاستلام من المستودع.",
     },
     STOCK_TRANSFER_MODIFIED: {
         "title": "تم تعديل كميات طلبك",

@@ -21,6 +21,7 @@ from apps.orders.models import (
 )
 from apps.products.models import Warehouse
 from apps.products.services.lookup import products_by_id
+from apps.reps.models import Rep
 
 QUANTITY_KWARGS = {"max_digits": 14, "decimal_places": 3, "min_value": Decimal("0.001")}
 
@@ -134,6 +135,40 @@ class StockTransferCreateSerializer(ProductLinesWriteMixin, serializers.Serializ
     notes = serializers.CharField(required=False, allow_blank=True, default="")
 
     def validate(self, data):
+        data["product_lines"] = self.build_product_lines(data["lines"])
+        return data
+
+
+class StockTransferDispatchSerializer(ProductLinesWriteMixin, serializers.Serializer):
+    """The office sending goods to a rep who never asked (§3.2, dispatch origin).
+
+    Same body as a rep's request plus the `rep` being sent to — which is the whole
+    difference, since a rep's own id comes from their token and can never be
+    chosen.
+    """
+
+    rep = serializers.IntegerField()
+    lines = QuantityLineWriteSerializer(many=True, allow_empty=False)
+    source_warehouse = serializers.PrimaryKeyRelatedField(
+        queryset=Warehouse.objects.all(), required=False, allow_null=True
+    )
+    destination_warehouse = serializers.PrimaryKeyRelatedField(
+        queryset=Warehouse.objects.all(), required=False, allow_null=True
+    )
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate_rep(self, value):
+        """Scope the rep to the caller's company, so an id cannot cross tenants."""
+        rep = Rep.objects.filter(
+            id=value, company_id=self.context["company"].id, is_active=True
+        ).first()
+        if rep is None:
+            raise serializers.ValidationError("المندوب غير موجود أو غير نشط")
+        self.context["rep"] = rep
+        return value
+
+    def validate(self, data):
+        data["rep_instance"] = self.context["rep"]
         data["product_lines"] = self.build_product_lines(data["lines"])
         return data
 

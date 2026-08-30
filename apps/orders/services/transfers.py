@@ -7,10 +7,21 @@
         rep rejects                    -> cancelled
     Rep taps "received"                -> received   <- the only stock movement
 
+The office can also start the document itself, for goods the rep never asked for
+— a van loaded overnight, a promotion pushed to the whole team:
+
+    Admin dispatches quantity          -> confirmed
+    Rep taps "received"                -> received   <- still the only movement
+
+A dispatch skips `pending` because there is nobody left to approve: the office
+both asked and answered. It joins the machine at `confirmed`, so from the rep's
+side the two origins are indistinguishable, and `receive` needs no special case.
+
 Confirmation and receipt are deliberately separate. Confirming means the rep
 agreed to the quantity; the goods have not left the building. Stock moves only on
 `received`, as two ledger rows in one transaction: out of the company warehouse
-and into the rep's.
+and into the rep's. That holds for a dispatch too — the office cannot put goods
+in a van by decree, because a van's contents are what the rep is accountable for.
 
 This is a transfer record, not an invoice: no tax fields, no totals, no money.
 Nothing internal is being sold.
@@ -31,6 +42,7 @@ from apps.common.modules import STOCK_TRANSFERS
 from apps.notifications.services import (
     STOCK_TRANSFER_CANCELLED,
     STOCK_TRANSFER_CONFIRMED,
+    STOCK_TRANSFER_DISPATCHED,
     STOCK_TRANSFER_MODIFIED,
     STOCK_TRANSFER_RECEIVED,
     STOCK_TRANSFER_REQUESTED,
@@ -98,18 +110,24 @@ def _transition(
     return transfer
 
 
-@transaction.atomic
-def create_stock_transfer(
+def _open_transfer(
     *,
     company_id: int,
     rep: Rep,
     lines: Sequence[tuple[Product, Decimal]],
-    source_warehouse: Warehouse | None = None,
-    destination_warehouse: Warehouse | None = None,
-    notes: str = "",
-    request: Request | None = None,
+    source_warehouse: Warehouse | None,
+    destination_warehouse: Warehouse | None,
+    notes: str,
+    status: str,
+    pre_approved: bool,
+    approved_by_id: int | None = None,
 ) -> StockTransfer:
-    """A rep asks the company for goods. Starts at `pending`; nothing moves yet."""
+    """Write a new transfer and its lines. Shared by the rep and office origins.
+
+    `pre_approved` fills `approved_qty` from the requested quantity at creation:
+    true for a dispatch, where the office already decided, and false for a
+    request, where the quantity is still a proposal.
+    """
     if not lines:
         raise DomainError("لا يمكن إرسال طلب فارغ", {"lines": ["No lines."]})
 
@@ -140,13 +158,17 @@ def create_stock_transfer(
         field="destination_warehouse",
     )
 
+    now = timezone.now()
     transfer = StockTransfer.objects.create(
         company_id=company_id,
         number=next_document_number(company_id, DocumentType.STOCK_TRANSFER),
         rep=rep,
         source_warehouse=source,
         destination_warehouse=destination,
-        requested_at=timezone.now(),
+        status=status,
+        requested_at=now,
+        approved_at=now if pre_approved else None,
+        approved_by_id=approved_by_id,
         notes=notes,
     )
 
@@ -158,9 +180,35 @@ def create_stock_transfer(
                 product=product,
                 unit_id=product.unit_id,
                 requested_qty=quantity,
+                approved_qty=quantity if pre_approved else None,
             )
             for product, quantity in lines
         ]
+    )
+    return transfer
+
+
+@transaction.atomic
+def create_stock_transfer(
+    *,
+    company_id: int,
+    rep: Rep,
+    lines: Sequence[tuple[Product, Decimal]],
+    source_warehouse: Warehouse | None = None,
+    destination_warehouse: Warehouse | None = None,
+    notes: str = "",
+    request: Request | None = None,
+) -> StockTransfer:
+    """A rep asks the company for goods. Starts at `pending`; nothing moves yet."""
+    transfer = _open_transfer(
+        company_id=company_id,
+        rep=rep,
+        lines=lines,
+        source_warehouse=source_warehouse,
+        destination_warehouse=destination_warehouse,
+        notes=notes,
+        status=StockTransferStatus.PENDING,
+        pre_approved=False,
     )
 
     notify_company_admins(
@@ -177,6 +225,60 @@ def create_stock_transfer(
         request=request,
         to_status=transfer.status,
         changes={"lines": len(lines)},
+    )
+    return transfer
+
+
+@transaction.atomic
+def dispatch_stock_transfer(
+    *,
+    company_id: int,
+    rep: Rep,
+    lines: Sequence[tuple[Product, Decimal]],
+    source_warehouse: Warehouse | None = None,
+    destination_warehouse: Warehouse | None = None,
+    notes: str = "",
+    dispatched_by_id: int | None = None,
+    request: Request | None = None,
+) -> StockTransfer:
+    """The office sends a rep goods they never requested. Starts at `confirmed`.
+
+    The mirror image of `create_stock_transfer`: same document, same ledger, same
+    receipt — only the origin differs. It opens at `confirmed` rather than
+    `pending` because a dispatch has nothing left to approve; the office asked and
+    answered in one act, which is why `approved_by` is the dispatching admin.
+
+    Still no stock movement here. The rep taps `receive` exactly as they would for
+    a transfer they raised, and until they do, the goods are the warehouse's. A
+    rep who will not carry them can `cancel` from `confirmed` — already a legal
+    hop, so refusal needs no special path.
+    """
+    transfer = _open_transfer(
+        company_id=company_id,
+        rep=rep,
+        lines=lines,
+        source_warehouse=source_warehouse,
+        destination_warehouse=destination_warehouse,
+        notes=notes,
+        status=StockTransferStatus.CONFIRMED,
+        pre_approved=True,
+        approved_by_id=dispatched_by_id,
+    )
+
+    notify_rep(
+        company_id=company_id,
+        rep_id=rep.id,
+        event_key=STOCK_TRANSFER_DISPATCHED,
+        payload={"stock_transfer_id": transfer.id, "number": transfer.number},
+    )
+
+    record_audit(
+        company_id=company_id,
+        entity=transfer,
+        action="dispatched",
+        request=request,
+        to_status=transfer.status,
+        changes={"lines": len(lines), "dispatched_by_id": dispatched_by_id},
     )
     return transfer
 

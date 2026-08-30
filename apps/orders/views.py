@@ -34,6 +34,7 @@ from apps.orders.serializers import (
     CustomerRequestSerializer,
     StockTransferCreateSerializer,
     StockTransferDetailSerializer,
+    StockTransferDispatchSerializer,
     StockTransferModifySerializer,
     StockTransferSerializer,
 )
@@ -70,6 +71,10 @@ class StockTransferViewSet(
     down and hands the transfer back to the rep for confirmation. Neither moves
     stock — only the rep's `receive` does.
 
+    `POST` is the office's own origin for the same document: goods sent to a rep
+    who never asked. It lands at `confirmed`, so the rep receives it exactly as
+    they would one they raised themselves.
+
     Filters: `status`, `rep`, `search`.
     """
 
@@ -80,6 +85,8 @@ class StockTransferViewSet(
     detail_key = "transfer"
 
     def get_serializer_class(self):
+        if self.action == "create":
+            return StockTransferDispatchSerializer
         return (
             StockTransferSerializer
             if self.action == "list"
@@ -118,6 +125,29 @@ class StockTransferViewSet(
         return success_response(
             data={"transfer": StockTransferDetailSerializer(transfer).data},
             message=message,
+        )
+
+    def create(self, request, *args, **kwargs):
+        """Send a rep goods they did not request."""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        transfer = transfer_service.dispatch_stock_transfer(
+            company_id=self.company.id,
+            rep=data["rep_instance"],
+            lines=data["product_lines"],
+            source_warehouse=data.get("source_warehouse"),
+            destination_warehouse=data.get("destination_warehouse"),
+            notes=data.get("notes", ""),
+            dispatched_by_id=request.user.id,
+            request=request,
+        )
+
+        return success_response(
+            data={"transfer": StockTransferDetailSerializer(transfer).data},
+            message="تم إرسال البضاعة بانتظار استلام المندوب",
+            status_code=status.HTTP_201_CREATED,
         )
 
     @action(detail=True, methods=["post"])

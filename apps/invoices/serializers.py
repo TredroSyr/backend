@@ -17,6 +17,7 @@ from decimal import Decimal
 from django.utils import timezone
 from rest_framework import serializers
 
+from apps.common.models import Currency
 from apps.customers.models import Customer
 from apps.invoices.models import (
     MONEY_ZERO,
@@ -33,6 +34,7 @@ from apps.invoices.models import (
 )
 from apps.invoices.services.documents import LineInput
 from apps.products.models import Warehouse
+from apps.products.services.images import primary_image_payload
 from apps.products.services.lookup import products_by_id, resolve_unit_price
 from apps.reps.models import Rep
 
@@ -65,11 +67,21 @@ class InvoiceSettingsSerializer(serializers.ModelSerializer):
 
 
 class LineReadSerializer(serializers.ModelSerializer):
-    """Read shape common to every priced line."""
+    """Read shape common to every priced line.
+
+    The product fields are what a line needs to render on its own — a document
+    is read far more often than the catalog behind it, and a client should not
+    have to fetch each product to draw a row. `unit` stays the line's own
+    snapshot, not the product's current unit, so an old document keeps reading
+    the way it was issued.
+    """
 
     product_name = serializers.CharField(source="product.name", read_only=True)
     product_sku = serializers.CharField(source="product.sku", read_only=True)
+    product_barcode = serializers.CharField(source="product.barcode", read_only=True)
+    product_image = serializers.SerializerMethodField(read_only=True)
     unit_name = serializers.CharField(source="unit.name", read_only=True)
+    unit_code = serializers.CharField(source="unit.code", read_only=True)
 
     class Meta:
         fields = [
@@ -77,14 +89,21 @@ class LineReadSerializer(serializers.ModelSerializer):
             "product",
             "product_name",
             "product_sku",
+            "product_barcode",
+            "product_image",
             "unit",
             "unit_name",
+            "unit_code",
             "quantity",
             "unit_price",
             "subtotal",
             "tax_rate",
         ]
         read_only_fields = fields
+
+    def get_product_image(self, obj):
+        """Cover image of the line's product, or None."""
+        return primary_image_payload(obj.product, self.context.get("request"))
 
 
 class IncomingInvoiceLineSerializer(LineReadSerializer):
@@ -125,14 +144,48 @@ class PricedLineWriteSerializer(serializers.Serializer):
     )
 
 
+class CurrencyCodeField(serializers.CharField):
+    """The currency a document is priced in, validated against the catalog.
+
+    Companies pick from `Currency`, they do not invent codes (see that model), so
+    an unknown or deactivated code is rejected here rather than being snapshotted
+    onto a document nobody can price.
+    """
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault("max_length", 3)
+        kwargs.setdefault("min_length", 3)
+        kwargs.setdefault("required", False)
+        kwargs.setdefault("allow_blank", True)
+        super().__init__(**kwargs)
+
+    def to_internal_value(self, data) -> str:
+        code = super().to_internal_value(data).strip().upper()
+        if code and not Currency.objects.filter(code=code, is_active=True).exists():
+            raise serializers.ValidationError("العملة غير معروفة أو غير مفعّلة")
+        return code
+
+
 class LinesWriteMixin:
     """Turns posted line dicts into `LineInput`s the service layer can consume."""
 
     #: Sales rejects non-sellable products; incoming stock does not care.
     sellable_only = False
 
+    def document_currency(self, data: dict) -> str:
+        """The code this document is priced in — the client's, or the company's.
+
+        Resolved here rather than left to the service because the lines have to be
+        priced in it before the service is ever called.
+        """
+        return data.get("currency") or self.context["company"].currency
+
     def build_line_inputs(
-        self, lines_data: list[dict], *, customer: Customer | None = None
+        self,
+        lines_data: list[dict],
+        *,
+        customer: Customer | None = None,
+        currency_code: str = "",
     ) -> list[LineInput]:
         company = self.context["company"]
         products = products_by_id(
@@ -150,7 +203,10 @@ class LinesWriteMixin:
 
             if unit_price is None:
                 unit_price = resolve_unit_price(
-                    product, company=company, customer=customer
+                    product,
+                    company=company,
+                    customer=customer,
+                    currency_code=currency_code,
                 )
 
             if unit_price is None:
@@ -173,7 +229,8 @@ class LinesWriteMixin:
                 {
                     "lines": [
                         "لا يوجد سعر محدد لبعض المنتجات، يرجى إدخال السعر يدوياً",
-                        f"Products without a resolvable price: {missing_price}",
+                        f"Products without a resolvable price in "
+                        f"{currency_code or company.currency}: {missing_price}",
                     ]
                 }
             )
@@ -239,9 +296,15 @@ class IncomingInvoiceCreateSerializer(LinesWriteMixin, serializers.Serializer):
     date = serializers.DateTimeField(required=False)
     supplier_ref = serializers.CharField(required=False, allow_blank=True, default="")
     notes = serializers.CharField(required=False, allow_blank=True, default="")
+    #: Omit to invoice in the company's currency — the usual case. Send one to buy
+    #: from a supplier who prices in something else.
+    currency = CurrencyCodeField()
 
     def validate(self, data):
-        data["line_inputs"] = self.build_line_inputs(data["lines"])
+        data["currency"] = self.document_currency(data)
+        data["line_inputs"] = self.build_line_inputs(
+            data["lines"], currency_code=data["currency"]
+        )
         return data
 
 
@@ -338,6 +401,9 @@ class SalesInvoiceCreateSerializer(LinesWriteMixin, serializers.Serializer):
     fulfils_request_ids = serializers.ListField(
         child=serializers.IntegerField(), required=False, default=list
     )
+    #: Omit to sell in the company's currency — the usual case. Send one to price
+    #: this sale in another, and the lines resolve from that currency's prices.
+    currency = CurrencyCodeField()
 
     def validate_customer_id(self, value):
         customer = Customer.objects.filter(id=value, is_active=True).first()
@@ -348,7 +414,10 @@ class SalesInvoiceCreateSerializer(LinesWriteMixin, serializers.Serializer):
     def validate(self, data):
         customer = Customer.objects.get(id=data["customer_id"])
         data["customer"] = customer
-        data["line_inputs"] = self.build_line_inputs(data["lines"], customer=customer)
+        data["currency"] = self.document_currency(data)
+        data["line_inputs"] = self.build_line_inputs(
+            data["lines"], customer=customer, currency_code=data["currency"]
+        )
         return data
 
 

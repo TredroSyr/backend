@@ -3,7 +3,18 @@
 from __future__ import annotations
 
 from django.db import transaction
-from django.db.models import Count, Prefetch, Q
+from django.db.models import (
+    Count,
+    DecimalField,
+    IntegerField,
+    OuterRef,
+    Prefetch,
+    Q,
+    Subquery,
+    Sum,
+    Value,
+)
+from django.db.models.functions import Coalesce
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -34,8 +45,42 @@ from apps.products.serializers import (
     ProductWriteSerializer,
     WarehouseSerializer,
 )
+from apps.products.services.images import primary_image_prefetch
 from apps.products.services.pricing import PriceNotFoundError, resolve_product_price
 from core.responses import error_response, success_response
+
+
+STOCK_DECIMAL = DecimalField(max_digits=14, decimal_places=3)
+
+
+def with_product_display_annotations(queryset):
+    """Annotate the totals `ProductListSerializer` shows for every row.
+
+    Subqueries rather than `annotate(Sum(...), Count(...))`: those would join
+    three reverse relations into one query, and each join multiplies the others'
+    rows, so every aggregate comes back inflated.
+    """
+
+    def total_of(model, field, output_field):
+        return Coalesce(
+            Subquery(
+                model.objects.filter(product=OuterRef("pk"))
+                .values("product")
+                .annotate(total=field)
+                .values("total")[:1],
+                output_field=output_field,
+            ),
+            Value(0, output_field=output_field),
+            output_field=output_field,
+        )
+
+    return queryset.annotate(
+        total_stock_sum=total_of(
+            ProductWarehouseStock, Sum("quantity"), STOCK_DECIMAL
+        ),
+        images_count_total=total_of(ProductImage, Count("id"), IntegerField()),
+        prices_count_total=total_of(ProductPrice, Count("id"), IntegerField()),
+    )
 
 
 class ProductCategoryViewSet(TenantScopedViewMixin, viewsets.ModelViewSet):
@@ -247,12 +292,10 @@ class ProductViewSet(TenantScopedViewMixin, viewsets.ModelViewSet):
         
         # Optimize queries based on action
         if self.action == "list":
-            queryset = queryset.select_related("category", "unit").prefetch_related(
-                Prefetch(
-                    "images",
-                    queryset=ProductImage.objects.filter(is_primary=True),
-                    to_attr="primary_images",
-                ),
+            queryset = with_product_display_annotations(
+                queryset.select_related("category", "unit")
+            ).prefetch_related(
+                primary_image_prefetch(),
                 Prefetch(
                     "prices",
                     queryset=ProductPrice.objects.filter(
@@ -262,7 +305,11 @@ class ProductViewSet(TenantScopedViewMixin, viewsets.ModelViewSet):
                 ),
             )
         elif self.action == "retrieve":
-            queryset = queryset.select_related("category", "unit").prefetch_related(
+            # No annotations here: the prefetches below already carry every
+            # count and total the detail serializer needs.
+            queryset = queryset.select_related(
+                "category", "category__parent", "unit"
+            ).prefetch_related(
                 "images",
                 Prefetch(
                     "prices",
@@ -273,6 +320,12 @@ class ProductViewSet(TenantScopedViewMixin, viewsets.ModelViewSet):
                 Prefetch(
                     "custom_field_values",
                     queryset=CustomFieldValue.objects.select_related("definition"),
+                ),
+                Prefetch(
+                    "warehouse_stocks",
+                    queryset=ProductWarehouseStock.objects.select_related(
+                        "warehouse", "warehouse__rep"
+                    ).order_by("warehouse__name"),
                 ),
             )
         
@@ -307,8 +360,11 @@ class ProductViewSet(TenantScopedViewMixin, viewsets.ModelViewSet):
         
         product = serializer.save()
         
-        # Return with detail serializer
-        detail_serializer = ProductDetailSerializer(product)
+        # Return with detail serializer. The context carries `request`, without
+        # which image URLs would come back relative here but absolute on GET.
+        detail_serializer = ProductDetailSerializer(
+            product, context=self.get_serializer_context()
+        )
         
         return success_response(
             data={"product": detail_serializer.data},
@@ -341,8 +397,11 @@ class ProductViewSet(TenantScopedViewMixin, viewsets.ModelViewSet):
         
         product = serializer.save()
         
-        # Return with detail serializer
-        detail_serializer = ProductDetailSerializer(product)
+        # Return with detail serializer. The context carries `request`, without
+        # which image URLs would come back relative here but absolute on GET.
+        detail_serializer = ProductDetailSerializer(
+            product, context=self.get_serializer_context()
+        )
         
         return success_response(
             data={"product": detail_serializer.data},
@@ -546,7 +605,11 @@ class ProductImageViewSet(TenantScopedViewMixin, viewsets.ModelViewSet):
         image = serializer.save(product=product, is_primary=is_primary)
         
         return success_response(
-            data={"image": ProductImageSerializer(image).data},
+            data={
+                "image": ProductImageSerializer(
+                    image, context=self.get_serializer_context()
+                ).data
+            },
             message="تم رفع الصورة بنجاح",
             status_code=status.HTTP_201_CREATED,
         )
@@ -598,7 +661,11 @@ class ProductImageViewSet(TenantScopedViewMixin, viewsets.ModelViewSet):
         image = serializer.save()
         
         return success_response(
-            data={"image": ProductImageSerializer(image).data},
+            data={
+                "image": ProductImageSerializer(
+                    image, context=self.get_serializer_context()
+                ).data
+            },
             message="تم تحديث الصورة بنجاح",
             status_code=status.HTTP_200_OK,
         )
@@ -810,8 +877,10 @@ class ProductWarehouseStockViewSet(TenantScopedViewMixin, viewsets.ReadOnlyModel
         warehouse_id = self.kwargs.get("warehouse_pk")
         if warehouse_id:
             queryset = queryset.filter(warehouse_id=warehouse_id)
-        
-        return queryset.select_related("product", "warehouse")
+
+        return queryset.select_related(
+            "product", "product__unit", "warehouse", "warehouse__rep"
+        )
     
     def list(self, request, *args, **kwargs):
         """List warehouse stock."""

@@ -425,6 +425,10 @@ class RepViewSet(TenantScopedViewMixin, viewsets.ModelViewSet):
     - PATCH /api/companies/reps/{id} - Update rep details
     - PUT /api/companies/reps/{id} - Full update of rep
     - DELETE /api/companies/reps/{id} - Delete a rep
+    
+    Creating a rep also creates their warehouse (their van) if they have none:
+    every field document defaults its warehouse to the rep's own, so a rep
+    without one cannot sell.
     """
     
     permission_classes = [IsAuthenticated]

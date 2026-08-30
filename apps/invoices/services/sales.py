@@ -69,6 +69,7 @@ def create_sales_invoice(
     payment_amount: Decimal | None = None,
     payment_collected_at: datetime | None = None,
     fulfils_request_ids: Sequence[int] = (),
+    currency: str = "",
     request: Request | None = None,
 ) -> SalesInvoice:
     """Write the sale, deduct the goods, and settle whatever was paid on the spot.
@@ -85,6 +86,10 @@ def create_sales_invoice(
     ids. `credit_ids` and `payment_amount` are optional: an invoice with neither is
     simply `deferred`, which is a supported outcome, not an error. There is no
     credit limit (§1).
+
+    `currency` is the code the sale is priced in, defaulting to the company's. It
+    is pinned onto the invoice and never re-read, so a later change to
+    `Company.currency` cannot re-denominate lines that were already priced.
     """
     if not lines:
         raise DomainError("لا يمكن إنشاء فاتورة بدون بنود", {"lines": ["No lines."]})
@@ -114,7 +119,7 @@ def create_sales_invoice(
         customer=customer,
         warehouse=warehouse,
         notes=notes,
-        currency=settings.company.currency,
+        currency=currency or settings.company.currency,
         **settings.as_snapshot(),
     )
 

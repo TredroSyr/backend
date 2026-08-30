@@ -131,10 +131,31 @@ def apply_credits(
 
     Treated as an immediate partial payment sourced from the credit (§3.7 rule 2)
     rather than a discount, so `paid_amount` stays honest. Several credits may be
-    applied at once as long as they fit inside the invoice total (§3.7 rule 4).
+    applied at once as long as they fit inside the invoice total (§3.7 rule 4) and
+    share its currency.
     """
     if not credits:
         return []
+
+    # Currency first: a credit is denominated by the sale it came back from, and
+    # documents no longer all share the company's currency. Comparing a USD credit
+    # against a SYP total below would be arithmetic on two different units — the
+    # "exceeds the invoice" check cannot mean anything until this one passes.
+    mismatched = [
+        credit.id
+        for credit in credits
+        if credit.source_return_invoice.currency != invoice.currency
+    ]
+    if mismatched:
+        raise DomainError(
+            "لا يمكن استخدام رصيد بعملة مختلفة عن عملة الفاتورة",
+            {
+                "credit_ids": [
+                    f"Credits not denominated in {invoice.currency}: {mismatched}"
+                ],
+                "currency": [invoice.currency],
+            },
+        )
 
     total = sum((credit.amount for credit in credits), MONEY_ZERO)
     if total > invoice.total_amount:

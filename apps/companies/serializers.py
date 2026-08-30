@@ -7,7 +7,9 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
 
+from apps.common.modules import PERMISSION_MODULE_KEYS
 from apps.companies.models import Company, ModulePermission, Role, SubUser
+from apps.products.services.warehouses import ensure_rep_warehouse
 from apps.reps.models import Rep
 
 
@@ -99,19 +101,14 @@ class ModulePermissionSerializer(serializers.Serializer):
     can_action = serializers.BooleanField(default=False)
     
     def validate_module(self, value):
-        """Validate that module is one of the six available modules."""
-        allowed_modules = [
-            "customers",
-            "invoices",
-            "orders",
-            "products",
-            "reps",
-            "notifications",
-        ]
-        
-        if value not in allowed_modules:
+        """Validate the key against the permission catalog.
+
+        `PERMISSION_MODULE_KEYS` includes the legacy `orders` key so clients that
+        still post it keep working; the picker only offers the catalog keys.
+        """
+        if value not in PERMISSION_MODULE_KEYS:
             raise serializers.ValidationError(
-                f"Module must be one of: {', '.join(allowed_modules)}"
+                f"Module must be one of: {', '.join(PERMISSION_MODULE_KEYS)}"
             )
         
         return value
@@ -395,7 +392,13 @@ class RepSerializer(serializers.ModelSerializer):
         return value
     
     def create(self, validated_data):
-        """Create a new rep with hashed password."""
+        """Create a new rep with hashed password, and give them a warehouse.
+
+        The van is part of what a rep *is* here: every field document defaults its
+        warehouse to the rep's own, so a rep created without one cannot sell until
+        somebody notices and creates it by hand. Same transaction as the rep, so
+        the two never disagree.
+        """
         company = self.context.get("company")
         if not company:
             raise serializers.ValidationError("لم يتم العثور على معلومات الشركة")
@@ -404,7 +407,11 @@ class RepSerializer(serializers.ModelSerializer):
         validated_data["password"] = make_password(validated_data["password"])
         validated_data["company"] = company
         
-        return super().create(validated_data)
+        with transaction.atomic():
+            rep = super().create(validated_data)
+            ensure_rep_warehouse(rep)
+        
+        return rep
     
     def update(self, instance, validated_data):
         """Update rep, hashing password if provided."""

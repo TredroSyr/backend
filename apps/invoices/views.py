@@ -23,15 +23,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
-from apps.common.modules import (
-    CUSTOMER_CREDITS,
-    INCOMING_INVOICES,
-    PAYMENT_COLLECTIONS,
-    REPORTS,
-    RETURN_INVOICES,
-    SALES_INVOICES,
-    SETTINGS,
-)
+from apps.common.modules import INVOICES, REPORTS, SETTINGS
 from apps.common.services.idempotency import IdempotentWriteMixin
 from apps.companies.mixins import (
     AuditHistoryMixin,
@@ -42,6 +34,7 @@ from apps.companies.mixins import (
 from apps.companies.permissions import HasModulePermission, IsSubUser
 from apps.invoices.models import (
     IncomingInvoice,
+    IncomingInvoiceLine,
     PaymentCollection,
     PendingCustomerCredit,
     ReturnInvoice,
@@ -74,6 +67,7 @@ from apps.invoices.services import reports as report_service
 from apps.invoices.services import returns as return_service
 from apps.invoices.services import sales as sales_service
 from apps.invoices.services.documents import get_invoice_settings
+from apps.products.services.images import primary_image_prefetch
 from apps.reps.permissions import IsRep
 from core.responses import decimal_string, success_response
 
@@ -165,7 +159,7 @@ class IncomingInvoiceViewSet(AdminDocumentViewSet):
     Filters: `status`, `warehouse`, `search` (number or supplier).
     """
 
-    required_module = INCOMING_INVOICES
+    required_module = INVOICES
     queryset = IncomingInvoice.objects.all()
     list_key = "invoices"
     detail_key = "invoice"
@@ -193,7 +187,9 @@ class IncomingInvoiceViewSet(AdminDocumentViewSet):
             queryset = queryset.filter(number__icontains=search)
 
         if self.action in {"retrieve", "issue", "cancel"}:
-            queryset = queryset.prefetch_related("lines__product", "lines__unit")
+            queryset = queryset.prefetch_related(
+                document_lines(IncomingInvoiceLine.objects.all())
+            )
 
         return queryset.order_by("-date", "-id")
 
@@ -213,6 +209,7 @@ class IncomingInvoiceViewSet(AdminDocumentViewSet):
             supplier_ref=data.get("supplier_ref", ""),
             notes=data.get("notes", ""),
             created_by_id=request.user.id,
+            currency=data.get("currency", ""),
             request=request,
         )
 
@@ -248,6 +245,20 @@ class IncomingInvoiceViewSet(AdminDocumentViewSet):
 # ---------------------------------------------------------------------------
 
 
+def document_lines(line_queryset) -> Prefetch:
+    """A document's lines carrying every relation `LineReadSerializer` reads.
+
+    All three document types render lines the same way, so the joins are
+    declared once; a missing one here is a query per line on every detail read.
+    """
+    return Prefetch(
+        "lines",
+        queryset=line_queryset.select_related("product", "unit").prefetch_related(
+            primary_image_prefetch("product__images")
+        ),
+    )
+
+
 def sales_invoice_queryset(base):
     """Shared prefetching and filtering for both sales-invoice audiences."""
     return base.select_related("rep", "customer", "warehouse")
@@ -258,11 +269,10 @@ def annotated_sales_lines():
 
     Lets the rep app show "3 of 10 returned" without a query per line.
     """
-    return Prefetch(
-        "lines",
-        queryset=SalesInvoiceLine.objects.select_related("product", "unit").annotate(
+    return document_lines(
+        SalesInvoiceLine.objects.annotate(
             returned_quantity=Sum("return_lines__quantity")
-        ),
+        )
     )
 
 
@@ -313,7 +323,7 @@ class SalesInvoiceViewSet(SalesInvoiceFilterMixin, AdminDocumentViewSet):
     `date_to`, `search`.
     """
 
-    required_module = SALES_INVOICES
+    required_module = INVOICES
     queryset = SalesInvoice.objects.all()
     list_key = "invoices"
     detail_key = "invoice"
@@ -350,6 +360,7 @@ class SalesInvoiceViewSet(SalesInvoiceFilterMixin, AdminDocumentViewSet):
             payment_amount=data.get("payment_amount"),
             payment_collected_at=data.get("payment_collected_at"),
             fulfils_request_ids=data.get("fulfils_request_ids", []),
+            currency=data.get("currency", ""),
             request=request,
         )
 
@@ -415,6 +426,9 @@ class RepSalesInvoiceViewSet(SalesInvoiceFilterMixin, RepDocumentViewSet):
     cash collected on the spot. Send an `Idempotency-Key` header; a retry after a
     dropped connection then replays the first response instead of invoicing the
     customer twice or double-deducting the van (§6.6).
+
+    Listing is scoped to the authenticated rep. Filters: `status`, `customer`,
+    `outstanding=true`, `date_from`, `date_to`, `search`.
     """
 
     queryset = SalesInvoice.objects.all()
@@ -465,6 +479,7 @@ class RepSalesInvoiceViewSet(SalesInvoiceFilterMixin, RepDocumentViewSet):
             payment_amount=data.get("payment_amount"),
             payment_collected_at=data.get("payment_collected_at"),
             fulfils_request_ids=data.get("fulfils_request_ids", []),
+            currency=data.get("currency", ""),
             request=request,
         )
 
@@ -552,10 +567,7 @@ def return_invoice_queryset(base, *, detailed: bool):
     queryset = base.select_related("sales_invoice", "rep", "warehouse")
     if detailed:
         queryset = queryset.prefetch_related(
-            Prefetch(
-                "lines",
-                queryset=ReturnInvoiceLine.objects.select_related("product", "unit"),
-            )
+            document_lines(ReturnInvoiceLine.objects.all())
         )
     return queryset
 
@@ -563,10 +575,13 @@ def return_invoice_queryset(base, *, detailed: bool):
 class ReturnInvoiceViewSet(ReturnInvoiceWriteMixin, AdminDocumentViewSet):
     """`/api/companies/return-invoices/`
 
-    Filters: `status`, `rep`, `sales_invoice`, `search`.
+    Filters: `status`, `rep`, `customer`, `sales_invoice`, `search`.
+
+    A return carries no customer of its own — it is always a credit note against
+    one sale — so `customer` filters through the parent invoice.
     """
 
-    required_module = RETURN_INVOICES
+    required_module = INVOICES
     queryset = ReturnInvoice.objects.all()
     list_key = "return_invoices"
     detail_key = "return_invoice"
@@ -587,6 +602,7 @@ class ReturnInvoiceViewSet(ReturnInvoiceWriteMixin, AdminDocumentViewSet):
         for param, field in (
             ("status", "status"),
             ("rep", "rep_id"),
+            ("customer", "sales_invoice__customer_id"),
             ("sales_invoice", "sales_invoice_id"),
         ):
             value = params.get(param)
@@ -611,7 +627,11 @@ class ReturnInvoiceViewSet(ReturnInvoiceWriteMixin, AdminDocumentViewSet):
 
 
 class RepReturnInvoiceViewSet(ReturnInvoiceWriteMixin, RepDocumentViewSet):
-    """`/api/reps/return-invoices/` — credit notes written during a visit."""
+    """`/api/reps/return-invoices/` — credit notes written during a visit.
+
+    Scoped to the authenticated rep. Filters: `status`, `customer`,
+    `sales_invoice`.
+    """
 
     queryset = ReturnInvoice.objects.all()
     list_key = "return_invoices"
@@ -629,13 +649,16 @@ class RepReturnInvoiceViewSet(ReturnInvoiceWriteMixin, RepDocumentViewSet):
             super().get_queryset(), detailed=self.action != "list"
         )
 
-        status_filter = self.request.query_params.get("status")
-        if status_filter:
-            queryset = queryset.filter(status=status_filter)
+        params = self.request.query_params
 
-        sales_invoice = self.request.query_params.get("sales_invoice")
-        if sales_invoice:
-            queryset = queryset.filter(sales_invoice_id=sales_invoice)
+        for param, field in (
+            ("status", "status"),
+            ("customer", "sales_invoice__customer_id"),
+            ("sales_invoice", "sales_invoice_id"),
+        ):
+            value = params.get(param)
+            if value:
+                queryset = queryset.filter(**{field: value})
 
         return queryset.order_by("-date", "-id")
 
@@ -670,6 +693,7 @@ class PaymentCollectionFilterMixin:
 
         for param, field in (
             ("sales_invoice", "sales_invoice_id"),
+            ("customer", "sales_invoice__customer_id"),
             ("source", "source"),
         ):
             value = params.get(param)
@@ -701,10 +725,13 @@ class PaymentCollectionViewSet(
     Payments are appended through the invoice they belong to
     (`POST /companies/sales-invoices/{id}/payments/`), never edited here: they are
     immutable records and the invoice balance is derived from them (§3.6).
+
+    Filters: `rep` (who collected), `customer` (through the paid invoice),
+    `sales_invoice`, `source`, `date_from`, `date_to`.
     """
 
     permission_classes = [IsAuthenticated, IsSubUser, HasModulePermission]
-    required_module = PAYMENT_COLLECTIONS
+    required_module = INVOICES
     queryset = PaymentCollection.objects.all()
     serializer_class = PaymentCollectionSerializer
     list_key = "payments"
@@ -737,6 +764,9 @@ class RepPaymentCollectionViewSet(
 
     Retry-safe with an `Idempotency-Key` header: a dropped response must not turn
     one collected payment into two (§6.6).
+
+    Listing is scoped to the authenticated rep. Filters: `customer`,
+    `sales_invoice`, `source`, `date_from`, `date_to`.
     """
 
     permission_classes = [IsAuthenticated, IsRep]
@@ -803,7 +833,13 @@ class CustomerCreditFilterMixin:
     def apply_credit_filters(self, queryset):
         params = self.request.query_params
 
-        for param, field in (("status", "status"), ("customer", "customer_id")):
+        # A credit has no rep of its own; it inherits the one from the return that
+        # created it, which is null for a company-direct sale.
+        for param, field in (
+            ("status", "status"),
+            ("customer", "customer_id"),
+            ("rep", "source_return_invoice__rep_id"),
+        ):
             value = params.get(param)
             if value:
                 queryset = queryset.filter(**{field: value})
@@ -826,10 +862,12 @@ class CustomerCreditViewSet(
     are applied manually against a new sale — this is a tracked list, not an
     auto-applying ledger (§3.7, §7). An admin can write one off with
     `POST {id}/cancel/`.
+
+    Filters: `status`, `customer`, `rep` (the rep on the return that raised it).
     """
 
     permission_classes = [IsAuthenticated, IsSubUser, HasModulePermission]
-    required_module = CUSTOMER_CREDITS
+    required_module = INVOICES
     queryset = PendingCustomerCredit.objects.all()
     serializer_class = PendingCustomerCreditSerializer
     list_key = "credits"

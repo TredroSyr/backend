@@ -11,8 +11,13 @@ rep's sale draining another rep's stock.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from apps.products.models import Warehouse, WarehouseOwnerType
 from core.domain import DomainError
+
+if TYPE_CHECKING:
+    from apps.reps.models import Rep
 
 
 def require_warehouse(
@@ -101,3 +106,35 @@ def default_rep_warehouse(
         )
 
     return warehouse
+
+
+def ensure_rep_warehouse(rep: Rep, *, name: str = "") -> Warehouse:
+    """Give a rep their van, so their first sale does not fail for want of one.
+
+    Called when a rep is created. Every field document defaults its warehouse to
+    `default_rep_warehouse`, so a rep without one cannot sell, take a return, or
+    receive a transfer — the company would have to notice and create it by hand.
+
+    Idempotent, and deliberately blunt about what "exists" means: if the rep has
+    any warehouse row at all it is returned untouched, inactive included. An
+    inactive van was deactivated by an admin on purpose; quietly minting a second
+    one would work around that decision rather than honour it.
+    """
+    existing = (
+        Warehouse.objects.filter(
+            company_id=rep.company_id,
+            rep_id=rep.id,
+            owner_type=WarehouseOwnerType.REP,
+        )
+        .order_by("id")
+        .first()
+    )
+    if existing is not None:
+        return existing
+
+    return Warehouse.objects.create(
+        company_id=rep.company_id,
+        rep=rep,
+        owner_type=WarehouseOwnerType.REP,
+        name=name or f"مستودع {rep.name}",
+    )

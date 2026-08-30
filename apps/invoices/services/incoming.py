@@ -52,9 +52,15 @@ def create_incoming_invoice(
     supplier_ref: str = "",
     notes: str = "",
     created_by_id: int | None = None,
+    currency: str = "",
     request: Request | None = None,
 ) -> IncomingInvoice:
-    """Create the invoice as a draft. No stock moves yet."""
+    """Create the invoice as a draft. No stock moves yet.
+
+    `currency` is the code the delivery was priced in, defaulting to the
+    company's. It is pinned here and never re-read, so a later change to
+    `Company.currency` cannot re-denominate a supplier bill already received.
+    """
     require_warehouse(
         warehouse, company_id=company_id, owner_type=WarehouseOwnerType.COMPANY
     )
@@ -68,7 +74,7 @@ def create_incoming_invoice(
         warehouse=warehouse,
         notes=notes,
         created_by_id=created_by_id,
-        currency=settings.company.currency,
+        currency=currency or settings.company.currency,
         **settings.as_snapshot(),
     )
 

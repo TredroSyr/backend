@@ -48,7 +48,11 @@ def products_by_id(
 
 
 def resolve_unit_price(
-    product: Product, *, company: Company, customer: Customer | None = None
+    product: Product,
+    *,
+    company: Company,
+    customer: Customer | None = None,
+    currency_code: str = "",
 ) -> Decimal | None:
     """Best-known price for a product, or None when the catalog has no answer.
 
@@ -56,8 +60,15 @@ def resolve_unit_price(
     general price) so a rep can post a line without a price and get the same
     figure the catalog would show. Returning None rather than raising lets the
     caller ask for an explicit price instead of guessing.
+
+    `currency_code` is the document's own currency, which is not always the
+    company's: prices are stored per currency, so a document priced in USD has to
+    read the USD rows or the number would be a SYP figure wearing a USD label.
+    Defaults to the company's currency, which is what the document defaults to.
     """
-    currency = Currency.objects.filter(code=company.currency, is_active=True).first()
+    currency = Currency.objects.filter(
+        code=currency_code or company.currency, is_active=True
+    ).first()
     if currency is None:
         return None
 

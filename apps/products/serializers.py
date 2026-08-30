@@ -5,6 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Sum
 from rest_framework import serializers
 
 from apps.common.models import Currency, UnitOfMeasure
@@ -18,14 +19,16 @@ from apps.products.models import (
     ProductWarehouseStock,
     Warehouse,
 )
+from apps.products.services.images import primary_image_payload
 
 
 class ProductCategorySerializer(serializers.ModelSerializer):
     """Serializer for ProductCategory with parent/children info."""
     
     children_count = serializers.SerializerMethodField(read_only=True)
+    products_count = serializers.SerializerMethodField(read_only=True)
     parent_name = serializers.CharField(source="parent.name", read_only=True, allow_null=True)
-    
+
     class Meta:
         model = ProductCategory
         fields = [
@@ -34,6 +37,7 @@ class ProductCategorySerializer(serializers.ModelSerializer):
             "parent",
             "parent_name",
             "children_count",
+            "products_count",
             "is_active",
             "created_at",
             "updated_at",
@@ -43,6 +47,10 @@ class ProductCategorySerializer(serializers.ModelSerializer):
     def get_children_count(self, obj):
         """Get count of direct children."""
         return obj.children.filter(is_active=True).count()
+
+    def get_products_count(self, obj):
+        """Number of active products in this category, for list badges."""
+        return obj.products.filter(is_active=True).count()
     
     def validate_parent(self, value):
         """Validate parent belongs to same company."""
@@ -104,7 +112,9 @@ class ProductPriceSerializer(serializers.ModelSerializer):
     """Serializer for ProductPrice with nested currency/category details."""
     
     currency_code = serializers.CharField(source="currency.code", read_only=True)
+    currency_name = serializers.CharField(source="currency.name", read_only=True)
     currency_symbol = serializers.CharField(source="currency.symbol", read_only=True)
+    price_type_display = serializers.CharField(source="get_price_type_display", read_only=True)
     customer_category_name = serializers.CharField(
         source="customer_category.name", 
         read_only=True, 
@@ -117,8 +127,10 @@ class ProductPriceSerializer(serializers.ModelSerializer):
             "id",
             "currency",
             "currency_code",
+            "currency_name",
             "currency_symbol",
             "price_type",
+            "price_type_display",
             "customer_category",
             "customer_category_name",
             "price",
@@ -261,27 +273,100 @@ class CustomFieldDefinitionSerializer(serializers.ModelSerializer):
         return value
 
 
-class ProductWarehouseStockSerializer(serializers.ModelSerializer):
-    """Read-only serializer for ProductWarehouseStock."""
-    
+class WarehouseStockRowSerializer(serializers.ModelSerializer):
+    """Per-warehouse quantities as shown on a product's detail page.
+
+    Product identity is deliberately absent: the rows are always read under one
+    product, so repeating its name on every row would only pad the payload.
+    """
+
     warehouse_name = serializers.CharField(source="warehouse.name", read_only=True)
-    product_name = serializers.CharField(source="product.name", read_only=True)
-    product_sku = serializers.CharField(source="product.sku", read_only=True)
-    
+    warehouse_kind = serializers.CharField(source="warehouse.kind", read_only=True)
+    warehouse_owner_type = serializers.CharField(source="warehouse.owner_type", read_only=True)
+    warehouse_is_active = serializers.BooleanField(source="warehouse.is_active", read_only=True)
+    rep = serializers.IntegerField(source="warehouse.rep_id", read_only=True, allow_null=True)
+    rep_name = serializers.CharField(source="warehouse.rep.name", read_only=True, allow_null=True)
+
     class Meta:
         model = ProductWarehouseStock
         fields = [
             "id",
             "warehouse",
             "warehouse_name",
-            "product",
-            "product_name",
-            "product_sku",
+            "warehouse_kind",
+            "warehouse_owner_type",
+            "warehouse_is_active",
+            "rep",
+            "rep_name",
             "quantity",
             "created_at",
             "updated_at",
         ]
         read_only_fields = fields
+
+
+class ProductWarehouseStockSerializer(serializers.ModelSerializer):
+    """Read-only serializer for ProductWarehouseStock."""
+
+    warehouse_name = serializers.CharField(source="warehouse.name", read_only=True)
+    warehouse_kind = serializers.CharField(source="warehouse.kind", read_only=True)
+    warehouse_owner_type = serializers.CharField(source="warehouse.owner_type", read_only=True)
+    warehouse_is_active = serializers.BooleanField(source="warehouse.is_active", read_only=True)
+    rep = serializers.IntegerField(source="warehouse.rep_id", read_only=True, allow_null=True)
+    rep_name = serializers.CharField(source="warehouse.rep.name", read_only=True, allow_null=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    product_sku = serializers.CharField(source="product.sku", read_only=True)
+    product_barcode = serializers.CharField(source="product.barcode", read_only=True)
+    product_is_active = serializers.BooleanField(source="product.is_active", read_only=True)
+    unit = serializers.IntegerField(source="product.unit_id", read_only=True)
+    unit_name = serializers.CharField(source="product.unit.name", read_only=True)
+    unit_code = serializers.CharField(source="product.unit.code", read_only=True)
+    reorder_point = serializers.DecimalField(
+        source="product.reorder_point",
+        max_digits=14,
+        decimal_places=3,
+        read_only=True,
+        allow_null=True,
+    )
+    is_low_stock = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = ProductWarehouseStock
+        fields = [
+            "id",
+            "warehouse",
+            "warehouse_name",
+            "warehouse_kind",
+            "warehouse_owner_type",
+            "warehouse_is_active",
+            "rep",
+            "rep_name",
+            "product",
+            "product_name",
+            "product_sku",
+            "product_barcode",
+            "product_is_active",
+            "unit",
+            "unit_name",
+            "unit_code",
+            "quantity",
+            "reorder_point",
+            "is_low_stock",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_is_low_stock(self, obj):
+        """True when this warehouse alone is at or below the product's reorder point.
+
+        Null when the product has no reorder point, so the frontend can tell
+        "healthy" apart from "not tracked".
+        """
+        reorder_point = obj.product.reorder_point
+        if reorder_point is None:
+            return None
+        return obj.quantity <= reorder_point
 
 
 class WarehouseSerializer(serializers.ModelSerializer):
@@ -336,84 +421,117 @@ class WarehouseSerializer(serializers.ModelSerializer):
         return data
 
 
-class ProductListSerializer(serializers.ModelSerializer):
-    """Lightweight serializer for product listing."""
-    
-    category_name = serializers.CharField(source="category.name", read_only=True, allow_null=True)
-    unit_name = serializers.CharField(source="unit.name", read_only=True)
-    primary_image = serializers.SerializerMethodField(read_only=True)
-    default_price = serializers.SerializerMethodField(read_only=True)
-    
-    class Meta:
-        model = Product
-        fields = [
-            "id",
-            "name",
-            "description",
-            "sku",
-            "barcode",
-            "brand",
-            "category",
-            "category_name",
-            "unit",
-            "unit_name",
-            "weight",
-            "weight_unit",
-            "length",
-            "width",
-            "height",
-            "dimension_unit",
-            "reorder_point",
-            "reorder_quantity",
-            "is_taxable",
-            "tax_rate",
-            "is_active",
-            "is_sellable",
-            "is_purchasable",
-            "status",
-            "external_reference",
-            "notes",
-            "primary_image",
-            "default_price",
-            "created_at",
-            "updated_at",
-        ]
-        read_only_fields = fields
-    
+class ProductDisplayFieldsMixin:
+    """Derived product fields shared by the list and detail serializers.
+
+    Every getter first looks for an annotation or a prefetch the viewset already
+    arranged and only falls back to its own query, so serializing N products
+    stays at a fixed number of queries.
+    """
+
+    def _is_prefetched(self, obj, name):
+        return name in getattr(obj, "_prefetched_objects_cache", {})
+
+    def _default_price_object(self, obj):
+        # `default_prices` is the filtered prefetch the list view sets up.
+        default_prices = getattr(obj, "default_prices", None)
+        if default_prices is not None:
+            return default_prices[0] if default_prices else None
+
+        if self._is_prefetched(obj, "prices"):
+            return next(
+                (
+                    price
+                    for price in obj.prices.all()
+                    if price.is_default and price.customer_category_id is None
+                ),
+                None,
+            )
+
+        return (
+            obj.prices.filter(is_default=True, customer_category__isnull=True)
+            .select_related("currency")
+            .first()
+        )
+
+    def _total_stock(self, obj):
+        total = getattr(obj, "total_stock_sum", None)
+        if total is not None:
+            return total
+
+        if self._is_prefetched(obj, "warehouse_stocks"):
+            return sum(
+                (stock.quantity for stock in obj.warehouse_stocks.all()),
+                Decimal("0"),
+            )
+
+        return obj.warehouse_stocks.aggregate(total=Sum("quantity"))["total"] or Decimal("0")
+
     def get_primary_image(self, obj):
-        """Get primary image URL if exists."""
-        primary = obj.images.filter(is_primary=True).first()
-        if primary and primary.image:
-            return {
-                "id": primary.id,
-                "image": primary.image.url,
-                "alt_text": primary.alt_text,
-            }
-        return None
-    
+        """Cover image for cards and detail headers, or None."""
+        return primary_image_payload(obj, self.context.get("request"))
+
     def get_default_price(self, obj):
-        """Get default price if exists."""
-        default = obj.prices.filter(is_default=True, customer_category__isnull=True).first()
-        if default:
-            return {
-                "price": str(default.price),
-                "currency_code": default.currency.code,
-                "currency_symbol": default.currency.symbol,
-                "price_type": default.price_type,
-            }
-        return None
+        """Price to show when no customer/currency context is given, or None."""
+        default = self._default_price_object(obj)
+        if default is None:
+            return None
+
+        return {
+            "id": default.id,
+            "price": str(default.price),
+            "currency": default.currency_id,
+            "currency_code": default.currency.code,
+            "currency_name": default.currency.name,
+            "currency_symbol": default.currency.symbol,
+            "price_type": default.price_type,
+        }
+
+    def get_total_stock(self, obj):
+        """Quantity on hand across every warehouse, as a string like other decimals."""
+        return str(self._total_stock(obj))
+
+    def get_is_low_stock(self, obj):
+        """True when total stock is at or below the reorder point.
+
+        Null when no reorder point is set: "not tracked" is a different answer
+        from "stock is fine".
+        """
+        if obj.reorder_point is None:
+            return None
+        return self._total_stock(obj) <= obj.reorder_point
+
+    def get_images_count(self, obj):
+        count = getattr(obj, "images_count_total", None)
+        if count is not None:
+            return count
+        if self._is_prefetched(obj, "images"):
+            return len(obj.images.all())
+        return obj.images.count()
+
+    def get_prices_count(self, obj):
+        count = getattr(obj, "prices_count_total", None)
+        if count is not None:
+            return count
+        if self._is_prefetched(obj, "prices"):
+            return len(obj.prices.all())
+        return obj.prices.count()
 
 
-class ProductDetailSerializer(serializers.ModelSerializer):
-    """Detailed serializer for product with nested data."""
-    
+class ProductListSerializer(ProductDisplayFieldsMixin, serializers.ModelSerializer):
+    """Lightweight serializer for product listing."""
+
     category_name = serializers.CharField(source="category.name", read_only=True, allow_null=True)
     unit_name = serializers.CharField(source="unit.name", read_only=True)
     unit_code = serializers.CharField(source="unit.code", read_only=True)
-    images = ProductImageSerializer(many=True, read_only=True)
-    prices = ProductPriceSerializer(many=True, read_only=True)
-    custom_fields = serializers.SerializerMethodField(read_only=True)
-    
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    primary_image = serializers.SerializerMethodField(read_only=True)
+    default_price = serializers.SerializerMethodField(read_only=True)
+    total_stock = serializers.SerializerMethodField(read_only=True)
+    is_low_stock = serializers.SerializerMethodField(read_only=True)
+    images_count = serializers.SerializerMethodField(read_only=True)
+    prices_count = serializers.SerializerMethodField(read_only=True)
+
     class Meta:
         model = Product
         fields = [
@@ -438,27 +556,160 @@ class ProductDetailSerializer(serializers.ModelSerializer):
             "reorder_quantity",
             "is_taxable",
             "tax_rate",
+            "is_active",
+            "is_sellable",
+            "is_purchasable",
+            "status",
+            "status_display",
+            "external_reference",
+            "notes",
+            "primary_image",
+            "default_price",
+            "total_stock",
+            "is_low_stock",
+            "images_count",
+            "prices_count",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class ProductDetailSerializer(ProductDisplayFieldsMixin, serializers.ModelSerializer):
+    """Detailed serializer for product with nested data."""
+
+    category_name = serializers.CharField(source="category.name", read_only=True, allow_null=True)
+    category_parent = serializers.IntegerField(
+        source="category.parent_id", read_only=True, allow_null=True
+    )
+    category_parent_name = serializers.CharField(
+        source="category.parent.name", read_only=True, allow_null=True
+    )
+    unit_name = serializers.CharField(source="unit.name", read_only=True)
+    unit_code = serializers.CharField(source="unit.code", read_only=True)
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    images = ProductImageSerializer(many=True, read_only=True)
+    prices = ProductPriceSerializer(many=True, read_only=True)
+    custom_fields = serializers.SerializerMethodField(read_only=True)
+    custom_field_values = serializers.SerializerMethodField(read_only=True)
+    warehouse_stocks = serializers.SerializerMethodField(read_only=True)
+    primary_image = serializers.SerializerMethodField(read_only=True)
+    default_price = serializers.SerializerMethodField(read_only=True)
+    total_stock = serializers.SerializerMethodField(read_only=True)
+    is_low_stock = serializers.SerializerMethodField(read_only=True)
+    images_count = serializers.SerializerMethodField(read_only=True)
+    prices_count = serializers.SerializerMethodField(read_only=True)
+    
+    class Meta:
+        model = Product
+        fields = [
+            "id",
+            "name",
+            "description",
+            "sku",
+            "barcode",
+            "brand",
+            "category",
+            "category_name",
+            "category_parent",
+            "category_parent_name",
+            "unit",
+            "unit_name",
+            "unit_code",
+            "weight",
+            "weight_unit",
+            "length",
+            "width",
+            "height",
+            "dimension_unit",
+            "reorder_point",
+            "reorder_quantity",
+            "is_taxable",
+            "tax_rate",
             "is_sellable",
             "is_purchasable",
             "external_reference",
             "notes",
             "status",
+            "status_display",
             "is_active",
             "images",
             "prices",
             "custom_fields",
+            "custom_field_values",
+            "primary_image",
+            "default_price",
+            "warehouse_stocks",
+            "total_stock",
+            "is_low_stock",
+            "images_count",
+            "prices_count",
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "images", "prices", "custom_fields", "created_at", "updated_at"]
-    
+        read_only_fields = [
+            "id",
+            "images",
+            "prices",
+            "custom_fields",
+            "custom_field_values",
+            "primary_image",
+            "default_price",
+            "warehouse_stocks",
+            "total_stock",
+            "is_low_stock",
+            "images_count",
+            "prices_count",
+            "created_at",
+            "updated_at",
+        ]
+
+    def _custom_field_values(self, obj):
+        """The rows behind both custom-field outputs, read once.
+
+        Two fields render them, so the list is cached on the instance: without
+        it the definition join would be paid twice on every product.
+        """
+        cached = getattr(obj, "_display_custom_field_values", None)
+        if cached is None:
+            values = (
+                obj.custom_field_values.all()
+                if self._is_prefetched(obj, "custom_field_values")
+                else obj.custom_field_values.select_related("definition")
+            )
+            cached = list(values)
+            obj._display_custom_field_values = cached
+        return cached
+
     def get_custom_fields(self, obj):
         """Get custom field values as a flat dict."""
-        values = obj.custom_field_values.select_related("definition").all()
         return {
             value.definition.key: value.value
-            for value in values
+            for value in self._custom_field_values(obj)
         }
+
+    def get_custom_field_values(self, obj):
+        """Same values as `custom_fields`, but carrying the labels to render.
+
+        The flat dict is what write requests echo back; this list is what a form
+        can draw without a second call to fetch every definition's label.
+        """
+        return [
+            {
+                "id": value.id,
+                "definition": value.definition_id,
+                "key": value.definition.key,
+                "label": value.definition.label,
+                "value": value.value,
+            }
+            for value in self._custom_field_values(obj)
+        ]
+
+    def get_warehouse_stocks(self, obj):
+        """Quantity per warehouse, so the detail page can show where stock sits."""
+        return WarehouseStockRowSerializer(
+            obj.warehouse_stocks.all(), many=True, context=self.context
+        ).data
     
     def validate_category(self, value):
         """Validate category belongs to same company."""

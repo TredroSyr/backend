@@ -17,7 +17,7 @@ Three audiences, three scoping rules:
 
 from __future__ import annotations
 
-from django.db.models import Prefetch, Sum
+from django.db.models import Prefetch, Q, Sum
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -184,7 +184,9 @@ class IncomingInvoiceViewSet(AdminDocumentViewSet):
 
         search = self.request.query_params.get("search")
         if search:
-            queryset = queryset.filter(number__icontains=search)
+            queryset = queryset.filter(
+                Q(number__icontains=search) | Q(supplier_ref__icontains=search)
+            )
 
         if self.action in {"retrieve", "issue", "cancel"}:
             queryset = queryset.prefetch_related(

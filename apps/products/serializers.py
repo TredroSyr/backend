@@ -433,7 +433,8 @@ class ProductDisplayFieldsMixin:
         return name in getattr(obj, "_prefetched_objects_cache", {})
 
     def _default_price_object(self, obj):
-        # `default_prices` is the filtered prefetch the list view sets up.
+        # `default_prices` is a filtered prefetch a view may set up instead of
+        # prefetching every price.
         default_prices = getattr(obj, "default_prices", None)
         if default_prices is not None:
             return default_prices[0] if default_prices else None
@@ -527,6 +528,7 @@ class ProductListSerializer(ProductDisplayFieldsMixin, serializers.ModelSerializ
     status_display = serializers.CharField(source="get_status_display", read_only=True)
     primary_image = serializers.SerializerMethodField(read_only=True)
     default_price = serializers.SerializerMethodField(read_only=True)
+    prices = ProductPriceSerializer(many=True, read_only=True)
     total_stock = serializers.SerializerMethodField(read_only=True)
     is_low_stock = serializers.SerializerMethodField(read_only=True)
     images_count = serializers.SerializerMethodField(read_only=True)
@@ -565,6 +567,7 @@ class ProductListSerializer(ProductDisplayFieldsMixin, serializers.ModelSerializ
             "notes",
             "primary_image",
             "default_price",
+            "prices",
             "total_stock",
             "is_low_stock",
             "images_count",

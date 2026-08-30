@@ -11,7 +11,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Sequence
 
 from apps.common.models import Currency
-from apps.products.models import Product
+from apps.products.models import PriceType, Product
 from apps.products.services.pricing import PriceNotFoundError, resolve_product_price
 from core.domain import DomainError
 
@@ -53,6 +53,7 @@ def resolve_unit_price(
     company: Company,
     customer: Customer | None = None,
     currency_code: str = "",
+    price_type: str = PriceType.STANDARD,
 ) -> Decimal | None:
     """Best-known price for a product, or None when the catalog has no answer.
 
@@ -65,6 +66,10 @@ def resolve_unit_price(
     company's: prices are stored per currency, so a document priced in USD has to
     read the USD rows or the number would be a SYP figure wearing a USD label.
     Defaults to the company's currency, which is what the document defaults to.
+
+    `price_type` selects which of the product's price lists to read. Selling
+    reads the standard list; a purchase document reads `cost`, because what the
+    supplier charged is not the price the goods are sold at.
     """
     currency = Currency.objects.filter(
         code=currency_code or company.currency, is_active=True
@@ -78,7 +83,10 @@ def resolve_unit_price(
 
     try:
         return resolve_product_price(
-            product, currency=currency, customer_category=category
+            product,
+            currency=currency,
+            customer_category=category,
+            price_type=price_type,
         )["price"]
     except PriceNotFoundError:
         return None

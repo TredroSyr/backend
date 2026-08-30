@@ -298,10 +298,9 @@ class ProductViewSet(TenantScopedViewMixin, viewsets.ModelViewSet):
                 primary_image_prefetch(),
                 Prefetch(
                     "prices",
-                    queryset=ProductPrice.objects.filter(
-                        is_default=True, customer_category__isnull=True
-                    ).select_related("currency"),
-                    to_attr="default_prices",
+                    queryset=ProductPrice.objects.select_related(
+                        "currency", "customer_category"
+                    ),
                 ),
             )
         elif self.action == "retrieve":

@@ -5,16 +5,24 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from rest_framework.test import APIClient
 
-from apps.common.models import DocumentType
-from apps.invoices.models import IncomingInvoiceStatus
+from apps.authentication.utils import generate_tokens_for_subuser
+from apps.common.models import Currency, DocumentType
+from apps.invoices.models import IncomingInvoice, IncomingInvoiceStatus
 from apps.invoices.services.documents import LineInput
 from apps.invoices.services.incoming import (
     cancel_incoming_invoice,
     create_incoming_invoice,
     issue_incoming_invoice,
 )
-from apps.products.models import ProductWarehouseStock, StockMovement, StockMovementType
+from apps.products.models import (
+    PriceType,
+    ProductPrice,
+    ProductWarehouseStock,
+    StockMovement,
+    StockMovementType,
+)
 from apps.products.services.stock import (
     InsufficientStockError,
     StockChange,
@@ -175,3 +183,132 @@ def test_incoming_invoice_rejects_a_rep_warehouse(company, rep_warehouse, produc
                 )
             ],
         )
+
+
+# ---------------------------------------------------------------------------
+# Which price list an omitted `unit_price` reads
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def admin_client(owner) -> APIClient:
+    client = APIClient()
+    client.credentials(
+        HTTP_AUTHORIZATION=f"Bearer {generate_tokens_for_subuser(owner)['access']}"
+    )
+    return client
+
+
+@pytest.fixture
+def product_with_a_cost_price(product, currency) -> ProductPrice:
+    """The conftest product sells for 10.00; here it costs 6.00.
+
+    Far enough apart that a line priced from the wrong list cannot pass by
+    coincidence.
+    """
+    return ProductPrice.objects.create(
+        product=product,
+        currency=currency,
+        price_type=PriceType.COST,
+        price=Decimal("6.00"),
+    )
+
+
+def post_incoming(client, warehouse, product, **overrides):
+    payload = {
+        "warehouse": warehouse.id,
+        "lines": [{"product_id": product.id, "quantity": "5"}],
+        **overrides,
+    }
+    return client.post("/api/companies/incoming-invoices/", payload, format="json")
+
+
+@pytest.mark.django_db
+def test_an_omitted_unit_price_is_read_from_the_cost_list(
+    admin_client, company_warehouse, product, product_with_a_cost_price
+):
+    response = post_incoming(admin_client, company_warehouse, product)
+
+    assert response.status_code == 201, response.data
+    invoice = response.data["data"]["invoice"]
+    assert [line["unit_price"] for line in invoice["lines"]] == ["6.00"]
+    assert invoice["total_amount"] == "30.00"
+
+
+@pytest.mark.django_db
+def test_a_missing_cost_price_is_refused_rather_than_sold_at_retail(
+    admin_client, company_warehouse, product
+):
+    """The product has a sale price and no cost price. Booking the bill at what
+    the goods are *sold* for would look deliberate and be wrong, so the write is
+    rejected and the price asked for instead.
+    """
+    response = post_incoming(admin_client, company_warehouse, product)
+
+    assert response.status_code == 400, response.data
+    assert IncomingInvoice.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_an_explicit_unit_price_still_wins(
+    admin_client, company_warehouse, product, product_with_a_cost_price
+):
+    response = post_incoming(
+        admin_client,
+        company_warehouse,
+        product,
+        lines=[{"product_id": product.id, "quantity": "5", "unit_price": "7.25"}],
+    )
+
+    assert response.status_code == 201, response.data
+    assert response.data["data"]["invoice"]["total_amount"] == "36.25"
+
+
+@pytest.mark.django_db
+def test_the_cost_list_is_read_in_the_documents_own_currency(
+    admin_client, company_warehouse, product, product_with_a_cost_price
+):
+    """A USD bill must read the USD cost row, not the SYP one."""
+    usd, _ = Currency.objects.get_or_create(
+        code="USD", defaults={"name": "US Dollar", "symbol": "$"}
+    )
+    ProductPrice.objects.create(
+        product=product,
+        currency=usd,
+        price_type=PriceType.COST,
+        price=Decimal("0.30"),
+    )
+
+    response = post_incoming(admin_client, company_warehouse, product, currency="USD")
+
+    assert response.status_code == 201, response.data
+    assert response.data["data"]["invoice"]["total_amount"] == "1.50"
+
+
+# ---------------------------------------------------------------------------
+# Listing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+def test_search_matches_the_supplier_as_well_as_the_number(
+    admin_client, company, company_warehouse, product
+):
+    lines = [LineInput(product=product, quantity=Decimal("1"), unit_price=Decimal("1.00"))]
+    wanted = create_incoming_invoice(
+        company_id=company.id,
+        warehouse=company_warehouse,
+        lines=lines,
+        supplier_ref="Damascus Trading Co.",
+    )
+    create_incoming_invoice(
+        company_id=company.id,
+        warehouse=company_warehouse,
+        lines=lines,
+        supplier_ref="Aleppo Wholesale",
+    )
+
+    response = admin_client.get("/api/companies/incoming-invoices/?search=Damascus")
+
+    assert response.status_code == 200, response.data
+    assert [row["id"] for row in response.data["data"]["invoices"]] == [wanted.id]

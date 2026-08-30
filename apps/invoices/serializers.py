@@ -33,7 +33,7 @@ from apps.invoices.models import (
     SalesInvoiceLine,
 )
 from apps.invoices.services.documents import LineInput
-from apps.products.models import Warehouse
+from apps.products.models import PriceType, Warehouse
 from apps.products.services.images import primary_image_payload
 from apps.products.services.lookup import products_by_id, resolve_unit_price
 from apps.reps.models import Rep
@@ -130,8 +130,11 @@ class ReturnInvoiceLineSerializer(LineReadSerializer):
 
 
 class PricedLineWriteSerializer(serializers.Serializer):
-    """One posted line. `unit_price` is optional: when omitted it is resolved from
-    the product catalog (customer-category price first, then the general price).
+    """One posted line.
+
+    `unit_price` is optional: when omitted it is resolved from the product
+    catalog (customer-category price first, then the general price) on the
+    document's own price list — standard when selling, cost when purchasing.
     """
 
     product_id = serializers.IntegerField()
@@ -172,6 +175,11 @@ class LinesWriteMixin:
     #: Sales rejects non-sellable products; incoming stock does not care.
     sellable_only = False
 
+    #: Which price list an omitted `unit_price` is resolved from. A purchase
+    #: document overrides this to `cost`: falling back to the standard price
+    #: there would book a supplier bill at what the goods are sold for.
+    price_type = PriceType.STANDARD
+
     def document_currency(self, data: dict) -> str:
         """The code this document is priced in — the client's, or the company's.
 
@@ -207,6 +215,7 @@ class LinesWriteMixin:
                     company=company,
                     customer=customer,
                     currency_code=currency_code,
+                    price_type=self.price_type,
                 )
 
             if unit_price is None:
@@ -229,7 +238,7 @@ class LinesWriteMixin:
                 {
                     "lines": [
                         "لا يوجد سعر محدد لبعض المنتجات، يرجى إدخال السعر يدوياً",
-                        f"Products without a resolvable price in "
+                        f"Products without a resolvable {self.price_type} price in "
                         f"{currency_code or company.currency}: {missing_price}",
                     ]
                 }
@@ -291,6 +300,12 @@ class IncomingInvoiceDetailSerializer(IncomingInvoiceSerializer):
 
 
 class IncomingInvoiceCreateSerializer(LinesWriteMixin, serializers.Serializer):
+    """A supplier delivery. Lines are priced at what the supplier charged, so an
+    omitted `unit_price` reads the product's cost list, never the sale price.
+    """
+
+    price_type = PriceType.COST
+
     warehouse = CompanyScopedPrimaryKeyRelatedField(queryset=Warehouse.objects.all())
     lines = PricedLineWriteSerializer(many=True, allow_empty=False)
     date = serializers.DateTimeField(required=False)

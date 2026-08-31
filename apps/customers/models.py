@@ -127,6 +127,16 @@ class Customer(models.Model):
         blank=True,
         help_text="Original referral code used during signup (immutable for tracking)",
     )
+    address = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text=(
+            "Free text as the rep would say it — street, neighbourhood, city. "
+            "Separate from latitude/longitude: a pin gets you there, this is what "
+            "a person reads on a route list."
+        ),
+    )
     latitude = models.DecimalField(
         max_digits=9, decimal_places=6, null=True, blank=True
     )

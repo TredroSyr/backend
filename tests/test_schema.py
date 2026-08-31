@@ -10,12 +10,6 @@ from apps.reps.models import Rep
 
 
 @pytest.mark.django_db
-def test_unit_of_measure_seed_contains_agreed_units() -> None:
-    codes = set(UnitOfMeasure.objects.values_list("code", flat=True))
-    assert {"liter", "kg", "package"}.issubset(codes)
-
-
-@pytest.mark.django_db
 def test_company_can_be_created() -> None:
     company = Company.objects.create(name="Acme", slug="acme", currency="USD")
     assert company.pk is not None

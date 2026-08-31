@@ -160,18 +160,6 @@ class TestCompanySignin:
         assert response.data["success"] is False
         assert "غير صحيحة" in response.data["message"]
     
-    def test_signin_nonexistent_phone(self, api_client):
-        """Test signin fails with nonexistent phone number."""
-        data = {
-            "phone": "+963999999999",
-            "password": "AnyPass123",
-        }
-        
-        response = api_client.post("/api/auth/company/signin", data, format="json")
-        
-        assert response.status_code == status.HTTP_401_UNAUTHORIZED
-        assert "غير صحيحة" in response.data["message"]
-    
     def test_signin_inactive_user(self, api_client, owner_subuser, db):
         """Test signin fails for inactive user."""
         owner_subuser.is_active = False

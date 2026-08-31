@@ -9,10 +9,12 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from apps.products.models import ProductPrice
+from apps.common.models import Currency
+from apps.products.models import PriceType, ProductPrice
 
 if TYPE_CHECKING:
-    from apps.common.models import Currency
+    from typing import Sequence
+
     from apps.customers.models import CustomerCategory
     from apps.products.models import Product
 
@@ -227,4 +229,40 @@ def calculate_price_with_tax(
         "tax_rate": product.tax_rate,
         "total_price": total_price.quantize(Decimal("0.01")),
         "is_taxable": True,
+    }
+
+
+def general_prices_by_product(
+    product_ids: Sequence[int],
+    *,
+    currency_code: str,
+    price_type: str = PriceType.STANDARD,
+) -> dict[int, Decimal]:
+    """The general price of many products at once, keyed by product id.
+
+    `resolve_product_price` answers for one product and costs a query each; a
+    listing — a van's contents, a catalog page — needs the same answer for every
+    row and would otherwise fire one query per product.
+
+    Only the general (no customer category) price is read, which is the whole
+    rule when there is no customer in context: nobody is being quoted, the number
+    is the shelf price. Missing products are simply absent from the mapping, the
+    same way `resolve_unit_price` returns None rather than raising.
+    """
+    product_ids = {product_id for product_id in product_ids}
+    if not product_ids:
+        return {}
+
+    currency = Currency.objects.filter(code=currency_code, is_active=True).first()
+    if currency is None:
+        return {}
+
+    return {
+        row.product_id: row.price
+        for row in ProductPrice.objects.filter(
+            product_id__in=product_ids,
+            currency_id=currency.id,
+            price_type=price_type,
+            customer_category__isnull=True,
+        )
     }

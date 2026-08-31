@@ -351,29 +351,32 @@ class RepCustomerRequestViewSet(
     A request is a heads-up about interest, not a confirmed order. The rep
     resolves one by passing its id as `fulfils_request_ids` when creating the
     Sales Invoice, so there is no "fulfil" action here.
+
+    Filters: `status`, `customer` — the latter is what the store page's
+    "الطلبات السابقة" section calls.
+
+    **Lines are included in the list here**, unlike the admin endpoint. The whole
+    content of a request is a handful of product rows, and they are the point of
+    the screen: a list of requests without them says a customer wants *something*.
+    They are prefetched, so this costs one extra query for the page, not one per
+    request.
     """
 
     permission_classes = [IsAuthenticated, IsRep]
     queryset = CustomerRequest.objects.all()
+    serializer_class = CustomerRequestDetailSerializer
     list_key = "requests"
 
     @property
     def rep_id(self) -> int:
         return self.request.token_payload.get("rep_id")
 
-    def get_serializer_class(self):
-        return (
-            CustomerRequestSerializer
-            if self.action == "list"
-            else CustomerRequestDetailSerializer
-        )
-
     def get_queryset(self):
         queryset = request_queryset(
             super().get_queryset().filter(
                 company_id=self.request.company_id, rep_id=self.rep_id
             ),
-            detailed=self.action != "list",
+            detailed=True,
         )
 
         params = self.request.query_params

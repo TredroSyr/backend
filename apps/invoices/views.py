@@ -25,6 +25,7 @@ from rest_framework.views import APIView
 
 from apps.common.modules import INVOICES, REPORTS, SETTINGS
 from apps.common.services.idempotency import IdempotentWriteMixin
+from apps.common.services.periods import filter_by_period
 from apps.companies.mixins import (
     AuditHistoryMixin,
     CompanyContextMixin,
@@ -295,13 +296,7 @@ class SalesInvoiceFilterMixin:
         if params.get("outstanding") == "true":
             queryset = queryset.filter(balance_due__gt=0)
 
-        date_from = params.get("date_from")
-        if date_from:
-            queryset = queryset.filter(date__gte=date_from)
-
-        date_to = params.get("date_to")
-        if date_to:
-            queryset = queryset.filter(date__lte=date_to)
+        queryset = filter_by_period(queryset, params)
 
         search = params.get("search")
         if search:
@@ -577,7 +572,8 @@ def return_invoice_queryset(base, *, detailed: bool):
 class ReturnInvoiceViewSet(ReturnInvoiceWriteMixin, AdminDocumentViewSet):
     """`/api/companies/return-invoices/`
 
-    Filters: `status`, `rep`, `customer`, `sales_invoice`, `search`.
+    Filters: `status`, `rep`, `customer`, `sales_invoice`, `search`,
+    `date_from`, `date_to`.
 
     A return carries no customer of its own — it is always a credit note against
     one sale — so `customer` filters through the parent invoice.
@@ -611,6 +607,8 @@ class ReturnInvoiceViewSet(ReturnInvoiceWriteMixin, AdminDocumentViewSet):
             if value:
                 queryset = queryset.filter(**{field: value})
 
+        queryset = filter_by_period(queryset, params)
+
         search = params.get("search")
         if search:
             queryset = queryset.filter(number__icontains=search)
@@ -632,7 +630,9 @@ class RepReturnInvoiceViewSet(ReturnInvoiceWriteMixin, RepDocumentViewSet):
     """`/api/reps/return-invoices/` — credit notes written during a visit.
 
     Scoped to the authenticated rep. Filters: `status`, `customer`,
-    `sales_invoice`.
+    `sales_invoice`, `date_from`, `date_to` — the same date vocabulary as the
+    sales list and the dashboard, so the home screen's period picker drives all
+    three with one pair of values.
     """
 
     queryset = ReturnInvoice.objects.all()
@@ -662,7 +662,7 @@ class RepReturnInvoiceViewSet(ReturnInvoiceWriteMixin, RepDocumentViewSet):
             if value:
                 queryset = queryset.filter(**{field: value})
 
-        return queryset.order_by("-date", "-id")
+        return filter_by_period(queryset, params).order_by("-date", "-id")
 
     def list(self, request, *args, **kwargs):
         return self.paginated_response(self.get_queryset())
@@ -702,13 +702,7 @@ class PaymentCollectionFilterMixin:
             if value:
                 queryset = queryset.filter(**{field: value})
 
-        date_from = params.get("date_from")
-        if date_from:
-            queryset = queryset.filter(collected_at__gte=date_from)
-
-        date_to = params.get("date_to")
-        if date_to:
-            queryset = queryset.filter(collected_at__lte=date_to)
+        queryset = filter_by_period(queryset, params, field="collected_at")
 
         return queryset.select_related("sales_invoice", "collected_by").order_by(
             "-collected_at", "-id"

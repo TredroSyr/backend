@@ -6,13 +6,30 @@ from django.db import models
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.views import APIView
 
+from apps.companies.mixins import PaginatedListMixin
 from apps.customers.models import Customer
 from apps.customers.serializers import CustomerSerializer
+from apps.invoices.serializers import ReturnInvoiceSerializer, SalesInvoiceSerializer
+from apps.products.models import ProductWarehouseStock
+from apps.products.services.pricing import general_prices_by_product
 from apps.reps.models import RepCustomerAssignment
 from apps.reps.permissions import IsRep
-from apps.reps.serializers import CustomerLocationWorkDaysUpdateSerializer
-from core.responses import error_response, success_response
+from apps.reps.serializers import (
+    MY_ASSIGNMENTS_ATTR,
+    CustomerLocationWorkDaysUpdateSerializer,
+    RepCustomerSerializer,
+    RepInventoryItemSerializer,
+)
+from apps.reps.services.customers import customer_balances
+from apps.reps.services.dashboard import (
+    parse_period,
+    parse_preview_limit,
+    rep_dashboard,
+)
+from apps.reps.services.inventory import rep_warehouse, van_stock_queryset, van_totals
+from core.responses import decimal_string, error_response, success_response
 
 
 class RepCustomerViewSet(viewsets.ModelViewSet):
@@ -26,31 +43,62 @@ class RepCustomerViewSet(viewsets.ModelViewSet):
     - Update customer location and work days
     - Filter by active status
     
+    Each row carries what the stores screen shows beside the name: the address,
+    the days this rep visits, and the store's running balance with this rep —
+    invoiced, paid, still due. The balances are a rollup of the rep's own sales
+    invoices, aggregated for the whole page in one query rather than per row.
+
     Endpoints:
     - GET /api/reps/customers - List assigned customers
     - POST /api/reps/customers - Create a new customer
     - GET /api/reps/customers/{id} - Get customer details
-    - PATCH /api/reps/customers/{id} - Update customer location and work days
+    - PATCH /api/reps/customers/{id} - Update customer address, location and work days
     - GET /api/reps/customers/stats - Get customer statistics
     """
     
     permission_classes = [IsAuthenticated, IsRep]
-    serializer_class = CustomerSerializer
+    serializer_class = RepCustomerSerializer
     http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    
+    @property
+    def rep_id(self):
+        return getattr(self.request, "token_payload", {}).get("rep_id")
     
     def get_queryset(self):
         """Return customers assigned to the authenticated rep."""
-        # Get rep_id from token payload
-        token_payload = getattr(self.request, "token_payload", {})
-        rep_id = token_payload.get("rep_id")
+        rep_id = self.rep_id
         
         if not rep_id:
             return Customer.objects.none()
         
-        # Get customers assigned to this rep
+        # This rep's own assignment is prefetched into `my_assignments` so the
+        # work-day badge on every row costs no query of its own; `rep` comes
+        # along because the fallback to the rep's default days reads it.
         return Customer.objects.filter(
             assigned_reps__id=rep_id
-        ).prefetch_related("assigned_reps").distinct()
+        ).prefetch_related(
+            "assigned_reps",
+            models.Prefetch(
+                "rep_assignments",
+                queryset=RepCustomerAssignment.objects.filter(
+                    rep_id=rep_id
+                ).select_related("rep"),
+                to_attr=MY_ASSIGNMENTS_ATTR,
+            ),
+        ).distinct()
+    
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["rep_id"] = self.rep_id
+        return context
+    
+    def balances_for(self, customers):
+        """The money rollup for the rows about to be rendered, in one query."""
+        return customer_balances(
+            self.request.company_id,
+            self.rep_id,
+            customer_ids=[customer.id for customer in customers],
+        )
     
     def list(self, request, *args, **kwargs):
         """List all customers assigned to the rep."""
@@ -61,19 +109,45 @@ class RepCustomerViewSet(viewsets.ModelViewSet):
         if is_active is not None:
             queryset = queryset.filter(is_active=is_active.lower() == "true")
         
-        # Optional search by name or phone
+        # Optional search by name, phone or address
         search = request.query_params.get("search")
         if search:
             queryset = queryset.filter(
-                models.Q(name__icontains=search) | models.Q(phone__icontains=search)
+                models.Q(name__icontains=search)
+                | models.Q(phone__icontains=search)
+                | models.Q(address__icontains=search)
             )
         
-        serializer = self.get_serializer(queryset, many=True)
+        # Optional filter to one visiting day — "today's route".
+        #
+        # Resolved through `get_effective_work_days` rather than a JSON query, so
+        # the fallback to the rep's default days is the model's one definition of
+        # that rule instead of a second copy that can drift from the badge each
+        # row prints. One small query: a rep has assignments in the hundreds.
+        work_day = request.query_params.get("work_day")
+        if work_day:
+            day = work_day.strip().lower()
+            matching = [
+                assignment.customer_id
+                for assignment in RepCustomerAssignment.objects.filter(
+                    rep_id=self.rep_id
+                ).select_related("rep")
+                if day in assignment.get_effective_work_days()
+            ]
+            queryset = queryset.filter(id__in=matching)
+        
+        customers = list(queryset)
+        serializer = self.get_serializer(
+            customers, many=True, context={
+                **self.get_serializer_context(),
+                "balances": self.balances_for(customers),
+            }
+        )
         
         return success_response(
             data={
                 "customers": serializer.data,
-                "total": queryset.count()
+                "total": len(customers)
             },
             status_code=status.HTTP_200_OK,
         )
@@ -160,19 +234,25 @@ class RepCustomerViewSet(viewsets.ModelViewSet):
         )
         
         return success_response(
-            data={"customer": CustomerSerializer(customer).data},
+            data={"customer": self.get_serializer(customer).data},
             message="تم إضافة العميل بنجاح وتعيينه لك",
             status_code=status.HTTP_201_CREATED,
         )
     
     def retrieve(self, request, *args, **kwargs):
-        """Get details of a specific customer."""
+        """Get details of a specific customer.
+
+        The store page's three header cards — إجمالي الفواتير / المدفوع /
+        المتبقي — are `total_invoiced`, `paid_amount` and `balance_due` on the
+        customer itself, the same fields the list row carries. The tabs below
+        them are the existing document lists filtered by `?customer={id}`:
+        sales-invoices, payments, return-invoices and customer-requests.
+        """
         # Check if customer is assigned to this rep
         instance = self.get_object()
         
         # Get rep_id from token payload
-        token_payload = getattr(request, "token_payload", {})
-        rep_id = token_payload.get("rep_id")
+        rep_id = self.rep_id
         
         if not instance.assigned_reps.filter(id=rep_id).exists():
             return error_response(
@@ -180,7 +260,13 @@ class RepCustomerViewSet(viewsets.ModelViewSet):
                 status_code=status.HTTP_403_FORBIDDEN,
             )
         
-        serializer = self.get_serializer(instance)
+        serializer = self.get_serializer(
+            instance,
+            context={
+                **self.get_serializer_context(),
+                "balances": self.balances_for([instance]),
+            },
+        )
         
         return success_response(
             data={"customer": serializer.data},
@@ -222,6 +308,13 @@ class RepCustomerViewSet(viewsets.ModelViewSet):
         
         validated_data = serializer.validated_data
         
+        # Update the address if provided
+        address_updated = False
+        if 'address' in validated_data:
+            customer.address = validated_data['address']
+            customer.save(update_fields=['address', 'updated_at'])
+            address_updated = True
+        
         # Update customer location if provided
         location_updated = False
         if 'latitude' in validated_data and 'longitude' in validated_data:
@@ -249,6 +342,8 @@ class RepCustomerViewSet(viewsets.ModelViewSet):
         
         # Build response message
         updates = []
+        if address_updated:
+            updates.append("العنوان")
         if location_updated:
             updates.append("الموقع")
         if work_days_updated:
@@ -257,7 +352,15 @@ class RepCustomerViewSet(viewsets.ModelViewSet):
         message = f"تم تحديث {' و '.join(updates)} بنجاح" if updates else "لم يتم إجراء أي تحديث"
         
         return success_response(
-            data={"customer": CustomerSerializer(customer).data},
+            data={
+                "customer": self.get_serializer(
+                    customer,
+                    context={
+                        **self.get_serializer_context(),
+                        "balances": self.balances_for([customer]),
+                    },
+                ).data
+            },
             message=message,
             status_code=status.HTTP_200_OK,
         )
@@ -420,4 +523,159 @@ class RepProfileViewSet(viewsets.ViewSet):
             },
             message="تم تحديث أيام العمل بنجاح",
             status_code=status.HTTP_200_OK,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Home screen
+#
+# The two read-only screens the rep app opens on. Neither owns a number: the
+# dashboard reads the documents in `apps.invoices`, and the van reads the stock
+# projection in `apps.products`, so a figure shown here and the same figure on
+# the document it came from cannot disagree.
+# ---------------------------------------------------------------------------
+
+
+class RepScopedViewMixin:
+    """The authenticated rep and their company, with no extra lookup.
+
+    `MultiActorJWTAuthentication` already resolved the `Rep` (with its company
+    select_related) to satisfy the token, so `request.user` *is* the rep. The
+    older viewsets in this module re-fetch by `token_payload["rep_id"]`, which is
+    the same id and the same rep — one query later.
+    """
+
+    permission_classes = [IsAuthenticated, IsRep]
+
+    @property
+    def rep(self):
+        return self.request.user
+
+    @property
+    def company(self):
+        return self.request.user.company
+
+
+class RepDashboardView(RepScopedViewMixin, APIView):
+    """`GET /api/reps/dashboard/` — everything the home screen renders, in one call.
+
+    Query params:
+
+    * `date=YYYY-MM-DD` — the day picker's shorthand, expanded to the whole day.
+    * `date_from` / `date_to` — the general form, same vocabulary as the invoice
+      lists; a bare date is widened to cover its whole day.
+    * `limit` — rows returned inline per section (default 10, max 50).
+
+    **No date parameters means no period filter**, which is what clearing the
+    picker does. The `sales` and `returns` cards then cover all time, while
+    `receivables` always does — see `services.dashboard` for why those two
+    windows are deliberately different.
+
+    The inline lists are a first page, not the whole set. Beyond `limit`, the
+    client reads `/api/reps/sales-invoices/` and `/api/reps/return-invoices/`,
+    which page, filter and accept the same dates; the van's full contents are at
+    `/api/reps/inventory/`.
+    """
+
+    permission_classes = [IsAuthenticated, IsRep]
+
+    def get(self, request):
+        date_from, date_to = parse_period(request.query_params)
+
+        data = rep_dashboard(
+            company=self.company,
+            rep=self.rep,
+            date_from=date_from,
+            date_to=date_to,
+            preview_limit=parse_preview_limit(request.query_params),
+        )
+
+        # The service returns model instances so the rows render through the same
+        # serializers the document endpoints use — an invoice on the home screen
+        # is byte-identical to the same invoice in its own list.
+        data["sales"]["invoices"] = SalesInvoiceSerializer(
+            data["sales"]["invoices"], many=True
+        ).data
+        data["returns"]["return_invoices"] = ReturnInvoiceSerializer(
+            data["returns"]["return_invoices"], many=True
+        ).data
+
+        warehouse = data["warehouse"]
+        if warehouse is not None:
+            warehouse["items"] = RepInventoryItemSerializer(
+                warehouse.pop("items"),
+                many=True,
+                context={"prices": warehouse.pop("prices"), "request": request},
+            ).data
+
+        return success_response(data=data)
+
+
+class RepInventoryViewSet(
+    RepScopedViewMixin, PaginatedListMixin, viewsets.GenericViewSet
+):
+    """`GET /api/reps/inventory/` — what is loaded in the rep's own van.
+
+    Read-only by design. A van's quantities are the ledger's answer, moved only
+    by the documents that move goods — receiving a stock transfer, writing a
+    sale, taking a return — so there is nothing here to edit.
+
+    Filters: `search` (name, SKU or barcode), `include_empty=true` to keep
+    products that have run out, which the stock-take screen wants and the
+    "what can I sell" screen does not.
+
+    The response carries `warehouse`, `total_quantity` and `product_count`
+    alongside the page, which is the header the van screen prints.
+    """
+
+    queryset = ProductWarehouseStock.objects.all()
+    serializer_class = RepInventoryItemSerializer
+    list_key = "items"
+
+    def get_queryset(self):
+        warehouse = rep_warehouse(self.company.id, self.rep.id)
+        if warehouse is None:
+            return self.queryset.none()
+
+        queryset = van_stock_queryset(
+            warehouse,
+            include_empty=self.request.query_params.get("include_empty") == "true",
+        )
+
+        search = self.request.query_params.get("search")
+        if search:
+            queryset = queryset.filter(
+                models.Q(product__name__icontains=search)
+                | models.Q(product__sku__icontains=search)
+                | models.Q(product__barcode__icontains=search)
+            )
+
+        return queryset
+
+    def get_serializer_context(self):
+        """Prices for every row on the list, in one query rather than one each."""
+        context = super().get_serializer_context()
+        context["prices"] = general_prices_by_product(
+            self.get_queryset().values_list("product_id", flat=True),
+            currency_code=self.company.currency,
+        )
+        return context
+
+    def list(self, request, *args, **kwargs):
+        warehouse = rep_warehouse(self.company.id, self.rep.id)
+        queryset = self.get_queryset()
+        totals = van_totals(queryset)
+
+        return self.paginated_response(
+            queryset,
+            extra={
+                "warehouse": (
+                    {"id": warehouse.id, "name": warehouse.name}
+                    if warehouse is not None
+                    else None
+                ),
+                "total_quantity": decimal_string(totals["total_quantity"], places=3),
+                "product_count": totals["product_count"],
+                "currency": self.company.currency,
+            },
         )

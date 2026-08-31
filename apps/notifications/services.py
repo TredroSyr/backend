@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Iterable
 
 from django.db.models import Q
+from django.utils import timezone
 
 from apps.companies.models import SubUser
 from apps.notifications.models import ActorType, Notification
@@ -154,3 +155,61 @@ def notify_many(
         )
         for actor_type, actor_id in recipients
     ]
+
+
+# ---------------------------------------------------------------------------
+# Read side
+#
+# `notify` above is how a row is written; these are how it is read back. Both
+# the notification endpoints and the rep dashboard's bell badge go through
+# `recipient_notifications`, so "which rows are mine" is answered in one place
+# rather than re-derived per screen — the question a multi-actor inbox is
+# easiest to get subtly wrong on.
+# ---------------------------------------------------------------------------
+
+
+def recipient_notifications(
+    *,
+    recipient_actor_type: str,
+    recipient_actor_id: int,
+    company_id: int | None = None,
+):
+    """Every notification addressed to one actor, newest first.
+
+    `company_id` scopes a SubUser or a Rep to their own tenant. It is left out
+    for a Customer, who is a global entity and can hold notifications from
+    several companies at once (customers.Customer docstring) — passing one there
+    would hide the rest of their inbox.
+    """
+    queryset = Notification.objects.filter(
+        recipient_actor_type=recipient_actor_type,
+        recipient_actor_id=recipient_actor_id,
+    )
+
+    if company_id is not None:
+        queryset = queryset.filter(company_id=company_id)
+
+    return queryset.order_by("-created_at", "-id")
+
+
+def unread_count(
+    *,
+    recipient_actor_type: str,
+    recipient_actor_id: int,
+    company_id: int | None = None,
+) -> int:
+    """The number on the bell."""
+    return recipient_notifications(
+        recipient_actor_type=recipient_actor_type,
+        recipient_actor_id=recipient_actor_id,
+        company_id=company_id,
+    ).filter(read_at__isnull=True).count()
+
+
+def mark_read(queryset) -> int:
+    """Stamp `read_at` on the unread rows of `queryset`; returns how many.
+
+    Only the unread ones are touched, so re-reading a thread cannot rewrite when
+    the recipient first saw it.
+    """
+    return queryset.filter(read_at__isnull=True).update(read_at=timezone.now())

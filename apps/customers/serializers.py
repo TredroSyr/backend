@@ -101,6 +101,7 @@ class CustomerSerializer(serializers.ModelSerializer):
             "assigned_reps_count",
             "assigned_reps_details",
             "referral_code_used",
+            "address",
             "latitude",
             "longitude",
             "is_active",
@@ -171,6 +172,12 @@ class CustomerCreateSerializer(serializers.Serializer):
         required=False,
         allow_empty=True,
         help_text="List of rep IDs to assign to this customer (with empty work_days)"
+    )
+    address = serializers.CharField(
+        max_length=255,
+        required=False,
+        allow_blank=True,
+        help_text="Street / neighbourhood / city, as a rep would read it"
     )
     latitude = serializers.DecimalField(
         max_digits=9,
@@ -279,6 +286,12 @@ class CustomerUpdateSerializer(serializers.Serializer):
         required=False,
         allow_empty=True,
         help_text="List of rep IDs to assign to this customer (replaces existing assignments)"
+    )
+    address = serializers.CharField(
+        max_length=255,
+        required=False,
+        allow_blank=True,
+        help_text="Street / neighbourhood / city, as a rep would read it"
     )
     latitude = serializers.DecimalField(
         max_digits=9,

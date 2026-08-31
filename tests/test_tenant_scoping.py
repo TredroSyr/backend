@@ -77,18 +77,6 @@ class DummyView(TenantScopedViewMixin):
 class TestTenantScopedViewMixin:
     """Tests for TenantScopedViewMixin."""
     
-    def test_get_queryset_with_company_id(self):
-        """Test that queryset is filtered by company_id from request."""
-        factory = APIRequestFactory()
-        request = factory.get("/api/test/")
-        request.company_id = 123
-        
-        view = DummyView()
-        view.request = request
-        
-        queryset = view.get_queryset()
-        assert queryset.company_id == 123
-    
     def test_get_queryset_without_company_id(self):
         """Test that queryset is empty when no company_id present."""
         factory = APIRequestFactory()

@@ -69,6 +69,9 @@ to the receivables card client-side.
 3 and 4 already existed; 4 gained `date_from` / `date_to` so the same picker
 drives it. Everything else is new.
 
+The other screens are documented below: **stores** §7–11, **orders**
+(customer requests) §12–16, **warehouse requests** §17–22.
+
 All of these require a rep token (`actor_type: "rep"`). A subuser or customer
 token gets **403**; no token gets **401**.
 
@@ -1049,3 +1052,280 @@ Things worth knowing:
   as a side effect — re-read it, or read `fulfilled_request_ids` off the invoice
   response.
 - **404, not 403**, for another rep's request.
+
+
+---
+---
+
+# Rep App API — Warehouse Requests
+
+The rep's `طلباتي` screen: asking the company warehouse for goods to load into
+the van, and the history of past requests.
+
+---
+
+## 17. What this screen is, and what it is not
+
+A **stock transfer** moves goods from a company warehouse into the rep's van. It
+is not an invoice: no tax fields, no debt, **nobody is charged**. Both warehouses
+belong to the same company; the goods simply change location.
+
+The money shown on these cards is therefore the **shelf value of the goods**, not
+a bill — it is there so the rep can see what they are asking to carry.
+
+### The one rule that governs the whole flow
+
+**Stock moves on `received`, and nowhere else.** Sending the request does not move
+it. The admin approving does not move it. A transfer sitting at `confirmed` for a
+week has changed no quantity in any warehouse. Only the rep tapping "استلمت"
+does, at which point the company warehouse drops and the van rises, atomically.
+
+```
+  rep sends            admin approves as-is        rep collects
+  POST /reps/          POST /companies/…/approve/  POST /reps/…/receive/
+  stock-transfers/            │                            │
+      │                       │                            │
+   pending ──────────────> confirmed ──────────────────> received
+      │                       ▲                     ← THE ONLY STOCK MOVEMENT
+      │ admin cuts quantities │
+      ▼                       │ rep accepts
+  modified_by_admin ─> pending_rep_confirmation ─┤
+                                                 └ rep rejects → cancelled
+```
+
+### Status → UI
+
+| `status` | Badge |
+|---|---|
+| `pending` | بانتظار موافقة المستودع |
+| `modified_by_admin`, `pending_rep_confirmation` | تم تعديل الكميات — needs `confirm`/`reject` |
+| `confirmed` | جاهز للاستلام |
+| `received` | تم التسليم · ✓ أضيفت لمستودع السيارة |
+| `cancelled` | ملغى |
+
+Full flow, including the office-dispatch origin, is in
+[frontend4.md](frontend4.md).
+
+---
+
+## 18. `GET /api/reps/products/` — the picker
+
+The list behind `طلب بضاعة جديد`. The company's sellable catalog, with the shelf
+price and — the reason this exists rather than `/api/companies/products/` —
+**`van_quantity`**, the `بالسيارة N` under each row.
+
+A rep ordering stock has to see what they are already carrying, or they order a
+second carton of tea that is sitting in the van.
+
+> Not the same as `/api/reps/inventory/` (§4). That one answers *"what is in my
+> van"* and hides sold-out rows. This one answers *"what could I ask for"* and
+> lists products with `van_quantity: "0.000"` — on a restock screen those are the
+> important rows.
+
+| Param | Meaning |
+|---|---|
+| `search` | Name, SKU or barcode |
+| `category` | Product category id |
+| `page`, `page_size` | Standard pagination |
+
+```json
+{
+  "success": true,
+  "message": "",
+  "data": {
+    "products": [
+      {
+        "id": 1,
+        "name": "Rice 1kg",
+        "sku": "",
+        "barcode": "",
+        "category": null,
+        "unit": 1,
+        "unit_name": "Package",
+        "unit_code": "package",
+        "price": "10.00",
+        "van_quantity": "24.000",
+        "image": null
+      },
+      {
+        "id": 2,
+        "name": "Sugar 1kg",
+        "price": "5.00",
+        "van_quantity": "0.000",
+        "image": null
+      }
+    ],
+    "currency": "SYP",
+    "pagination": { "count": 2, "page": 1, "page_size": 50, "total_pages": 1 }
+  }
+}
+```
+
+Only **active, sellable** products appear. `price` is the general shelf price and
+is `null` when the catalog has none — `null` means "not priced", never "free".
+`van_quantity` is always a number, `"0.000"` when the rep carries none: not
+carrying something is a known quantity, not a missing one.
+
+---
+
+## 19. `POST /api/reps/stock-transfers/` — send the request
+
+```http
+POST /api/reps/stock-transfers/
+Idempotency-Key: <uuid>
+```
+
+```json
+{
+  "lines": [
+    { "product_id": 1, "quantity": "24" },
+    { "product_id": 2, "quantity": "40" }
+  ],
+  "pickup_within_hours": 3,
+  "notes": ""
+}
+```
+
+| Field | Notes |
+|---|---|
+| `lines[].product_id` | **`product_id`**, not `product` |
+| `lines[].quantity` | String or number, must be > 0 |
+| `pickup_within_hours` | Optional. `وقت الاستلام` — the chips 1/2/3/4/6. Any 1–24 accepted |
+| `source_warehouse`, `destination_warehouse` | Optional; default to the company's main warehouse and the rep's own van |
+| `notes` | Optional free text |
+
+Send an `Idempotency-Key`: a dropped response on a bad connection must not turn
+one request into two. Returns **201** with the transfer at `pending`, and the
+warehouse staff get a notification.
+
+### About `pickup_within_hours`
+
+It is **information, not a rule.** It tells the warehouse keeper when to have the
+goods on the dock. Nothing enforces it: a transfer does not expire, is not
+cancelled when the window passes, and the rep can still collect a day later.
+
+`pickup_deadline` is returned alongside it and is simply `requested_at +
+pickup_within_hours` — derived on read, so the two can never drift apart. Both are
+`null` when no window was given, which is always the case for a transfer the
+office dispatched (the rep never asked, so promised nothing).
+
+That is the `مهلة الاستلام 3 ساعة · حتى 14:30` on each card: the window, and the
+deadline it implies.
+
+---
+
+## 20. `GET /api/reps/stock-transfers/` — the history
+
+Scoped to the rep, newest first, paged. Every row carries its lines and total —
+the card renders without a second call.
+
+| Param | Meaning |
+|---|---|
+| `status` | One of the six statuses |
+| `date`, `date_from`, `date_to` | Filters on `requested_at`. Same whole-day rule as §3. Omit for `كل التواريخ` |
+
+```json
+{
+  "success": true,
+  "message": "",
+  "data": {
+    "transfers": [
+      {
+        "id": 1,
+        "number": "TRF-00001",
+        "rep": 1,
+        "rep_name": "Sami",
+        "source_warehouse": 2,
+        "source_warehouse_name": "Main store",
+        "destination_warehouse": 1,
+        "destination_warehouse_name": "Sami's van",
+        "status": "received",
+        "requested_at": "2026-08-31T12:09:22.745206Z",
+        "pickup_within_hours": 3,
+        "pickup_deadline": "2026-08-31T15:09:22.745206Z",
+        "approved_at": "2026-08-31T12:09:22.760970Z",
+        "received_at": "2026-08-31T12:09:22.775271Z",
+        "cancelled_at": null,
+        "line_count": 1,
+        "notes": "",
+        "created_at": "2026-08-31T12:09:22.749159Z",
+        "updated_at": "2026-08-31T12:09:22.775383Z",
+        "lines": [
+          {
+            "id": 1,
+            "product": 1,
+            "product_name": "Rice 1kg",
+            "product_sku": "",
+            "unit": 1,
+            "unit_name": "Package",
+            "requested_qty": "24.000",
+            "approved_qty": "24.000",
+            "effective_qty": "24.000",
+            "unit_price": "10.00",
+            "line_total": "240.00"
+          }
+        ],
+        "estimated_total": "240.00"
+      }
+    ],
+    "pagination": { "count": 2, "page": 1, "page_size": 50, "total_pages": 1 }
+  }
+}
+```
+
+### Quantities: which one to show
+
+| Field | Meaning |
+|---|---|
+| `requested_qty` | What the rep asked for |
+| `approved_qty` | What the admin allowed. **`null` until an admin acts** |
+| `effective_qty` | What will actually move — approved if set, else requested |
+
+**Render `effective_qty`.** It is the one that is always correct, and it is what
+`line_total` and `estimated_total` are priced on: once an admin trims 24 down to
+10, the card's total drops with it. Show `requested_qty` beside it only on a
+`modified_by_admin` card, where the difference is the point.
+
+### The money
+
+`unit_price`, `line_total` and `estimated_total` are resolved from the catalog on
+read and **never stored** — a transfer carries no money, and this is the shelf
+value of the goods, not a charge. A product the catalog cannot price is `null`
+and is skipped rather than counted as free, so `estimated_total` can be partial;
+`null` means nothing on the transfer could be priced.
+
+---
+
+## 21. The rest of the flow
+
+| Call | When | Effect |
+|---|---|---|
+| `POST /api/reps/stock-transfers/{id}/confirm/` | status is `pending_rep_confirmation` | Rep accepts the admin's cut quantities → `confirmed` |
+| `POST /api/reps/stock-transfers/{id}/reject/` | status is `pending_rep_confirmation` | Rep refuses → `cancelled`, terminal |
+| `POST /api/reps/stock-transfers/{id}/receive/` | status is `confirmed` | **Moves the stock.** Company warehouse −, van + → `received` |
+
+`receive` takes an `Idempotency-Key` and must have one: tapping "استلمت" twice on
+a flaky connection must not transfer the goods twice.
+
+An illegal transition returns **409**, not 400 — e.g. receiving something still
+`pending`. Drive the buttons off `status` rather than letting the rep find out.
+
+After a successful `receive`, the van quantities in `/api/reps/inventory/` and
+`/api/reps/products/` reflect the new stock immediately — that is the
+`✓ أضيفت لمستودع السيارة` confirmation.
+
+---
+
+## 22. Things that will bite
+
+- **`product_id`, not `product`**, in the request body's lines. The read
+  serializers return `product`; the write serializer takes `product_id`.
+- **Price the card off `effective_qty`**, not `requested_qty`.
+- **`approved_qty` is `null` before an admin acts** — do not render it as 0.
+- **`pickup_within_hours` is a promise, not a timer.** Nothing expires. Do not
+  show a countdown that implies the request dies.
+- **Stock moves only on `receive`.** If the UI shows the van filling up when the
+  admin approves, it is lying to the rep.
+- **Send an `Idempotency-Key`** on both `create` and `receive`.
+- **`van_quantity` is `"0.000"`, `price` can be `null`** — different meanings,
+  don't collapse them.

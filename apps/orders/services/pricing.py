@@ -1,9 +1,12 @@
-"""Indicative money on a customer request.
+"""Indicative money on the two documents that carry none.
 
-A request line deliberately stores no price — nothing has been agreed yet, and
-the rep prices the goods when the Sales Invoice is written (§3.3). But the rep
-screen still has to show what a request is roughly worth, or "accept" is a
-decision made blind.
+Neither a customer request nor a stock transfer stores a price, and both are
+right not to: nothing has been agreed on a request until the Sales Invoice is
+written (§3.3), and a transfer is stock moving between two warehouses of one
+company, where nobody is charged at all.
+
+But both rep screens have to show a value, or "accept" and "send to the warehouse"
+are decisions made blind.
 
 So the figures here are **resolved from the catalog on read, never stored**. They
 are what the customer *would* be charged today, category override included, which
@@ -21,11 +24,15 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Iterable
 
 from apps.customers.models import CustomerCategoryAssignment
-from apps.products.services.pricing import price_for, prices_by_product
+from apps.products.services.pricing import (
+    general_prices_by_product,
+    price_for,
+    prices_by_product,
+)
 
 if TYPE_CHECKING:
     from apps.companies.models import Company
-    from apps.orders.models import CustomerRequest
+    from apps.orders.models import CustomerRequest, StockTransfer
 
 ZERO = Decimal("0")
 
@@ -69,3 +76,16 @@ def price_requests(requests: Iterable[CustomerRequest], *, company: Company) -> 
                 resolved[line.id] = price
 
     return resolved
+
+
+def price_transfers(transfers: Iterable[StockTransfer], *, company: Company) -> dict:
+    """Shelf prices for every product across `transfers`, keyed by product id.
+
+    The general price, with no customer in context — a transfer has no customer,
+    and what the rep is looking at is the value of the goods they are asking to
+    carry, not a quote to anybody.
+    """
+    products = [
+        line.product_id for transfer in transfers for line in transfer.lines.all()
+    ]
+    return general_prices_by_product(products, currency_code=company.currency)

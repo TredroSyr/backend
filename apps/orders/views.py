@@ -40,17 +40,22 @@ from apps.orders.serializers import (
     StockTransferSerializer,
 )
 from apps.orders.services import requests as request_service
-from apps.orders.services.request_pricing import price_requests
+from apps.orders.services.pricing import price_requests, price_transfers
 from apps.orders.services import transfers as transfer_service
 from apps.reps.permissions import IsRep
 from core.responses import success_response
 
 
 def transfer_queryset(base, *, detailed: bool):
+    """Transfers carrying what every audience renders.
+
+    Lines are prefetched either way — `detailed` only decides whether their
+    product and unit come too — because even a summary row prints `line_count`.
+    """
     queryset = base.select_related("rep", "source_warehouse", "destination_warehouse")
     if detailed:
-        queryset = queryset.prefetch_related("lines__product", "lines__unit")
-    return queryset
+        return queryset.prefetch_related("lines__product", "lines__unit")
+    return queryset.prefetch_related("lines")
 
 
 def request_queryset(base, *, detailed: bool):
@@ -199,6 +204,7 @@ class RepStockTransferViewSet(
 
     permission_classes = [IsAuthenticated, IsRep]
     queryset = StockTransfer.objects.all()
+    serializer_class = StockTransferDetailSerializer
     list_key = "transfers"
     detail_key = "transfer"
 
@@ -209,32 +215,55 @@ class RepStockTransferViewSet(
     def get_serializer_class(self):
         if self.action == "create":
             return StockTransferCreateSerializer
-        return (
-            StockTransferSerializer
-            if self.action == "list"
-            else StockTransferDetailSerializer
-        )
+        return StockTransferDetailSerializer
 
     def get_queryset(self):
         queryset = transfer_queryset(
             super().get_queryset().filter(
                 company_id=self.request.company_id, rep_id=self.rep_id
             ),
-            detailed=self.action != "list",
+            detailed=True,
         )
 
         status_filter = self.request.query_params.get("status")
         if status_filter:
             queryset = queryset.filter(status=status_filter)
 
-        return queryset.order_by("-requested_at", "-id")
+        return filter_by_period(queryset, self.request.query_params,
+                                field="requested_at").order_by("-requested_at", "-id")
+
+    def get_serializer_context(self):
+        """Shelf prices for the page being rendered.
+
+        `paginated_response` slices the page before it builds the serializer, so
+        by the time this runs the rows going out are known and can be priced in
+        one batch. Detail and action responses have no page and pass their own
+        context through `priced()`.
+        """
+        context = super().get_serializer_context()
+        page = getattr(getattr(self, "paginator", None), "page", None)
+        context["product_prices"] = price_transfers(
+            list(page) if page is not None else [], company=self.company
+        )
+        return context
+
+    def priced(self, transfers):
+        return {
+            **super().get_serializer_context(),
+            "product_prices": price_transfers(transfers, company=self.company),
+        }
 
     def list(self, request, *args, **kwargs):
         return self.paginated_response(self.get_queryset())
 
     def retrieve(self, request, *args, **kwargs):
+        transfer = self.get_object()
         return success_response(
-            data={"transfer": self.get_serializer(self.get_object()).data}
+            data={
+                "transfer": self.get_serializer(
+                    transfer, context=self.priced([transfer])
+                ).data
+            }
         )
 
     def create(self, request, *args, **kwargs):
@@ -254,19 +283,23 @@ class RepStockTransferViewSet(
             source_warehouse=data.get("source_warehouse"),
             destination_warehouse=data.get("destination_warehouse"),
             notes=data.get("notes", ""),
+            pickup_within_hours=data.get("pickup_within_hours"),
             request=request,
         )
 
-        return success_response(
-            data={"transfer": StockTransferDetailSerializer(transfer).data},
-            message="تم إرسال طلب البضاعة",
-            status_code=status.HTTP_201_CREATED,
+        return self._respond(
+            transfer, "تم إرسال طلب البضاعة", status_code=status.HTTP_201_CREATED
         )
 
-    def _respond(self, transfer, message):
+    def _respond(self, transfer, message, status_code=status.HTTP_200_OK):
         return success_response(
-            data={"transfer": StockTransferDetailSerializer(transfer).data},
+            data={
+                "transfer": StockTransferDetailSerializer(
+                    transfer, context=self.priced([transfer])
+                ).data
+            },
             message=message,
+            status_code=status_code,
         )
 
     @action(detail=True, methods=["post"])

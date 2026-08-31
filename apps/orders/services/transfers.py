@@ -121,6 +121,7 @@ def _open_transfer(
     status: str,
     pre_approved: bool,
     approved_by_id: int | None = None,
+    pickup_within_hours: int | None = None,
 ) -> StockTransfer:
     """Write a new transfer and its lines. Shared by the rep and office origins.
 
@@ -169,6 +170,7 @@ def _open_transfer(
         requested_at=now,
         approved_at=now if pre_approved else None,
         approved_by_id=approved_by_id,
+        pickup_within_hours=pickup_within_hours,
         notes=notes,
     )
 
@@ -197,9 +199,15 @@ def create_stock_transfer(
     source_warehouse: Warehouse | None = None,
     destination_warehouse: Warehouse | None = None,
     notes: str = "",
+    pickup_within_hours: int | None = None,
     request: Request | None = None,
 ) -> StockTransfer:
-    """A rep asks the company for goods. Starts at `pending`; nothing moves yet."""
+    """A rep asks the company for goods. Starts at `pending`; nothing moves yet.
+
+    `pickup_within_hours` is the window the rep promises to collect in. It is
+    information for the warehouse keeper — when to have the goods on the dock —
+    and nothing in the state machine enforces it: a transfer does not expire.
+    """
     transfer = _open_transfer(
         company_id=company_id,
         rep=rep,
@@ -209,13 +217,19 @@ def create_stock_transfer(
         notes=notes,
         status=StockTransferStatus.PENDING,
         pre_approved=False,
+        pickup_within_hours=pickup_within_hours,
     )
 
     notify_company_admins(
         company_id=company_id,
         module=STOCK_TRANSFERS,
         event_key=STOCK_TRANSFER_REQUESTED,
-        payload={"stock_transfer_id": transfer.id, "number": transfer.number, "rep_id": rep.id},
+        payload={
+            "stock_transfer_id": transfer.id,
+            "number": transfer.number,
+            "rep_id": rep.id,
+            "pickup_within_hours": pickup_within_hours,
+        },
     )
 
     record_audit(

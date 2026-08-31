@@ -12,7 +12,8 @@ from apps.companies.mixins import PaginatedListMixin
 from apps.customers.models import Customer
 from apps.customers.serializers import CustomerSerializer
 from apps.invoices.serializers import ReturnInvoiceSerializer, SalesInvoiceSerializer
-from apps.products.models import ProductWarehouseStock
+from apps.products.models import Product, ProductWarehouseStock
+from apps.products.services.images import primary_image_prefetch
 from apps.products.services.pricing import general_prices_by_product
 from apps.reps.models import RepCustomerAssignment
 from apps.reps.permissions import IsRep
@@ -21,6 +22,7 @@ from apps.reps.serializers import (
     CustomerLocationWorkDaysUpdateSerializer,
     RepCustomerSerializer,
     RepInventoryItemSerializer,
+    RepProductSerializer,
 )
 from apps.reps.services.customers import customer_balances
 from apps.reps.services.dashboard import (
@@ -678,4 +680,80 @@ class RepInventoryViewSet(
                 "product_count": totals["product_count"],
                 "currency": self.company.currency,
             },
+        )
+
+
+class RepProductViewSet(RepScopedViewMixin, PaginatedListMixin, viewsets.GenericViewSet):
+    """`GET /api/reps/products/` — the catalog the rep orders and sells from.
+
+    The picker behind "طلب بضاعة جديد". It is the company's sellable catalog with
+    two things a rep cannot get from `/api/companies/products/`: the shelf price,
+    and `van_quantity` — how many of each they are already carrying. Ordering
+    without seeing what is on board is how a rep ends up with two cartons of the
+    same tea.
+
+    Distinct from `/api/reps/inventory/`, which answers "what is in my van".
+    This one answers "what exists that I could ask for", and lists products whose
+    van quantity is zero — those are exactly the rows a restock screen is for.
+
+    Filters: `search` (name, SKU or barcode), `category`.
+    """
+
+    queryset = Product.objects.all()
+    serializer_class = RepProductSerializer
+    list_key = "products"
+
+    def get_queryset(self):
+        queryset = (
+            Product.objects.filter(
+                company_id=self.company.id, is_active=True, is_sellable=True
+            )
+            .select_related("unit")
+            .prefetch_related(primary_image_prefetch())
+        )
+
+        search = self.request.query_params.get("search")
+        if search:
+            queryset = queryset.filter(
+                models.Q(name__icontains=search)
+                | models.Q(sku__icontains=search)
+                | models.Q(barcode__icontains=search)
+            )
+
+        category = self.request.query_params.get("category")
+        if category:
+            queryset = queryset.filter(category_id=category)
+
+        return queryset.order_by("name", "id")
+
+    def get_serializer_context(self):
+        """Prices and van quantities for the page, two queries rather than 2N.
+
+        `paginated_response` slices the page before building the serializer, so
+        the rows going out are known by the time this runs.
+        """
+        context = super().get_serializer_context()
+        page = getattr(getattr(self, "paginator", None), "page", None)
+        products = list(page) if page is not None else []
+        product_ids = [product.id for product in products]
+
+        context["prices"] = general_prices_by_product(
+            product_ids, currency_code=self.company.currency
+        )
+
+        warehouse = rep_warehouse(self.company.id, self.rep.id)
+        context["van_quantities"] = (
+            dict(
+                ProductWarehouseStock.objects.filter(
+                    warehouse=warehouse, product_id__in=product_ids
+                ).values_list("product_id", "quantity")
+            )
+            if warehouse is not None and product_ids
+            else {}
+        )
+        return context
+
+    def list(self, request, *args, **kwargs):
+        return self.paginated_response(
+            self.get_queryset(), extra={"currency": self.company.currency}
         )

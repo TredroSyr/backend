@@ -15,6 +15,7 @@ from rest_framework import serializers
 from apps.common.serializers import line_count_of
 from apps.companies.models import Company
 from apps.orders.models import (
+    MAX_PICKUP_WINDOW_HOURS,
     CustomerRequest,
     CustomerRequestLine,
     StockTransfer,
@@ -62,9 +63,23 @@ class ProductLinesWriteMixin:
 
 
 class StockTransferLineSerializer(ProductLineReadSerializer):
+    """A product being moved, with what it is worth at today's shelf price.
+
+    A transfer carries no money — it is stock moving between two warehouses of
+    the same company, and nobody is being charged. `unit_price` and `line_total`
+    are resolved from the catalog on read purely so the rep can see the value of
+    what they are asking for, and are null when the caller did not ask for
+    pricing or the catalog has no price.
+
+    The value is priced on `effective_qty`, not `requested_qty`: once an admin
+    trims a line, what the rep is getting is the approved amount.
+    """
+
     effective_qty = serializers.DecimalField(
         max_digits=14, decimal_places=3, read_only=True
     )
+    unit_price = serializers.SerializerMethodField()
+    line_total = serializers.SerializerMethodField()
 
     class Meta:
         model = StockTransferLine
@@ -78,12 +93,27 @@ class StockTransferLineSerializer(ProductLineReadSerializer):
             "requested_qty",
             "approved_qty",
             "effective_qty",
+            "unit_price",
+            "line_total",
         ]
         read_only_fields = fields
+
+    def _price(self, obj):
+        return (self.context.get("product_prices") or {}).get(obj.product_id)
+
+    def get_unit_price(self, obj):
+        price = self._price(obj)
+        return decimal_string(price) if price is not None else None
+
+    def get_line_total(self, obj):
+        price = self._price(obj)
+        return decimal_string(price * obj.effective_qty) if price is not None else None
 
 
 class StockTransferSerializer(serializers.ModelSerializer):
     rep_name = serializers.CharField(source="rep.name", read_only=True)
+    pickup_deadline = serializers.DateTimeField(read_only=True, allow_null=True)
+    line_count = serializers.SerializerMethodField()
     source_warehouse_name = serializers.CharField(
         source="source_warehouse.name", read_only=True
     )
@@ -104,22 +134,50 @@ class StockTransferSerializer(serializers.ModelSerializer):
             "destination_warehouse_name",
             "status",
             "requested_at",
+            "pickup_within_hours",
+            "pickup_deadline",
             "approved_at",
             "received_at",
             "cancelled_at",
+            "line_count",
             "notes",
             "created_at",
             "updated_at",
         ]
         read_only_fields = fields
 
+    def get_line_count(self, obj) -> int:
+        return line_count_of(obj)
+
 
 class StockTransferDetailSerializer(StockTransferSerializer):
+    """Adds the lines, and the total the request card prints."""
+
     lines = StockTransferLineSerializer(many=True, read_only=True)
+    estimated_total = serializers.SerializerMethodField()
 
     class Meta(StockTransferSerializer.Meta):
-        fields = [*StockTransferSerializer.Meta.fields, "lines"]
+        fields = [
+            *StockTransferSerializer.Meta.fields,
+            "lines",
+            "estimated_total",
+        ]
         read_only_fields = fields
+
+    def get_estimated_total(self, obj):
+        """Shelf value of everything on the transfer, or null if nothing priced.
+
+        A line the catalog cannot price is skipped rather than counted as free,
+        so this can be a partial figure — compare `lines[].unit_price` against
+        null if the screen needs to say so.
+        """
+        prices = self.context.get("product_prices") or {}
+        priced = [
+            prices[line.product_id] * line.effective_qty
+            for line in obj.lines.all()
+            if line.product_id in prices
+        ]
+        return decimal_string(sum(priced)) if priced else None
 
 
 class StockTransferCreateSerializer(ProductLinesWriteMixin, serializers.Serializer):
@@ -133,6 +191,16 @@ class StockTransferCreateSerializer(ProductLinesWriteMixin, serializers.Serializ
     )
     destination_warehouse = serializers.PrimaryKeyRelatedField(
         queryset=Warehouse.objects.all(), required=False, allow_null=True
+    )
+    pickup_within_hours = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        min_value=1,
+        max_value=MAX_PICKUP_WINDOW_HOURS,
+        help_text=(
+            "Hours from now the rep expects to collect in. The app offers "
+            "1/2/3/4/6; anything up to 24 is accepted."
+        ),
     )
     notes = serializers.CharField(required=False, allow_blank=True, default="")
 

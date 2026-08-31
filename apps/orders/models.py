@@ -16,10 +16,18 @@ write to lives in `apps.products`.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from django.db import models
 
 from apps.common.models import TimeStampedModel
 from apps.products.models import ProductLine
+
+
+#: Widest pickup window a rep may promise. The app offers 1/2/3/4/6 hours as
+#: chips; the bound here is what the API actually enforces, so adding a chip is a
+#: design change and not a backend one.
+MAX_PICKUP_WINDOW_HOURS = 24
 
 
 class StockTransferStatus(models.TextChoices):
@@ -101,6 +109,14 @@ class StockTransfer(TimeStampedModel):
         default=StockTransferStatus.PENDING,
     )
     requested_at = models.DateTimeField()
+    pickup_within_hours = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "How long after requesting the rep expects to collect. Null on a "
+            "dispatch, where the office started it and no window was promised."
+        ),
+    )
     approved_at = models.DateTimeField(null=True, blank=True)
     received_at = models.DateTimeField(null=True, blank=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)
@@ -133,6 +149,19 @@ class StockTransfer(TimeStampedModel):
 
     def can_transition_to(self, status: str) -> bool:
         return status in STOCK_TRANSFER_TRANSITIONS.get(self.status, set())
+
+    @property
+    def pickup_deadline(self):
+        """When the rep said they would collect by, or None if they gave no window.
+
+        Derived rather than stored: it is `requested_at` plus the window, and
+        storing it would let the two drift apart. Nothing enforces it — it is a
+        promise to the warehouse keeper about when to have the goods ready, not a
+        rule the state machine checks.
+        """
+        if self.pickup_within_hours is None:
+            return None
+        return self.requested_at + timedelta(hours=self.pickup_within_hours)
 
 
 class StockTransferLine(ProductLine):

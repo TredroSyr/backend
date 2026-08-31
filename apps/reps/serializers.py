@@ -5,7 +5,7 @@ from __future__ import annotations
 from rest_framework import serializers
 
 from apps.customers.serializers import CustomerSerializer
-from apps.products.models import ProductWarehouseStock
+from apps.products.models import Product, ProductWarehouseStock
 from apps.products.services.images import primary_image_payload
 from apps.reps.models import Rep, RepCustomerAssignment
 from apps.reps.services.customers import EMPTY_BALANCE
@@ -278,3 +278,60 @@ class RepCustomerSerializer(CustomerSerializer):
 
     def get_balance_due(self, obj) -> str:
         return self._balance(obj)["balance_due"]
+
+
+class RepProductSerializer(serializers.ModelSerializer):
+    """A product as the rep's picker shows it: what it is, what it sells for,
+    and how many the rep already has on board.
+
+    `van_quantity` is the "بالسيارة N" under each row — the whole reason this
+    exists rather than the rep reading `/api/companies/products/`. A rep about to
+    order stock needs to see what they are already carrying, or they order a
+    second carton of something sitting in the van.
+
+    Both `price` and `van_quantity` come from context, batched for the page by
+    the viewset: one query for every price, one for every quantity, instead of
+    two per row. `price` is the general shelf price and is null when the catalog
+    has none — null means "not priced", not "free".
+    """
+
+    unit = serializers.IntegerField(source="unit_id", read_only=True)
+    unit_name = serializers.CharField(source="unit.name", read_only=True)
+    unit_code = serializers.CharField(source="unit.code", read_only=True)
+    price = serializers.SerializerMethodField()
+    van_quantity = serializers.SerializerMethodField()
+    image = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = [
+            "id",
+            "name",
+            "sku",
+            "barcode",
+            "category",
+            "unit",
+            "unit_name",
+            "unit_code",
+            "price",
+            "van_quantity",
+            "image",
+        ]
+        read_only_fields = fields
+
+    def get_price(self, obj):
+        price = (self.context.get("prices") or {}).get(obj.id)
+        return decimal_string(price) if price is not None else None
+
+    def get_van_quantity(self, obj) -> str:
+        """Zero, not null, for a product the rep is not carrying.
+
+        The picker prints it for every row; "none on board" is a known quantity,
+        not a missing one.
+        """
+        return decimal_string(
+            (self.context.get("van_quantities") or {}).get(obj.id, 0), places=3
+        )
+
+    def get_image(self, obj):
+        return primary_image_payload(obj, self.context.get("request"))

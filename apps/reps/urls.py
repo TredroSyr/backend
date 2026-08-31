@@ -9,6 +9,7 @@ from apps.reps.views import (
     RepCustomerViewSet,
     RepDashboardView,
     RepInventoryViewSet,
+    RepProductViewSet,
     RepProfileViewSet,
 )
 
@@ -17,6 +18,7 @@ router = DefaultRouter()
 router.register(r"reps/customers", RepCustomerViewSet, basename="rep-customer")
 router.register(r"reps/profile", RepProfileViewSet, basename="rep-profile")
 router.register(r"reps/inventory", RepInventoryViewSet, basename="rep-inventory")
+router.register(r"reps/products", RepProductViewSet, basename="rep-product")
 
 urlpatterns = [
     # Home screen — one read that fills every card on it.

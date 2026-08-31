@@ -176,9 +176,23 @@ class StockTransferLine(ProductLine):
 
 
 class CustomerRequestStatus(models.TextChoices):
+    """Where a request stands with the rep who owns it.
+
+    `accepted` and `rejected` are the rep's answer to the customer: yes, I will
+    bring this, or no. Neither moves stock or money — accepting is a promise to
+    visit, and the delivery is still the Sales Invoice, which is what actually
+    fulfils the request (§3.3).
+
+    `rejected` and `cancelled` are both closed-without-delivery but are not the
+    same event: the rep turned it down, versus the customer withdrew it. Keeping
+    them apart is what lets either side see who ended it.
+    """
+
     PENDING = "pending", "Pending"
+    ACCEPTED = "accepted", "Accepted by rep"
     FULFILLED = "fulfilled", "Fulfilled"
-    CANCELLED = "cancelled", "Cancelled"
+    REJECTED = "rejected", "Rejected by rep"
+    CANCELLED = "cancelled", "Cancelled by customer"
 
 
 class CustomerRequest(TimeStampedModel):
@@ -226,6 +240,14 @@ class CustomerRequest(TimeStampedModel):
     )
     fulfilled_at = models.DateTimeField(null=True, blank=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    rejected_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Optional note the rep leaves when turning a request down.",
+    )
     notes = models.TextField(blank=True, default="")
 
     class Meta:

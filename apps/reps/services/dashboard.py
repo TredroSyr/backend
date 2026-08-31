@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 from django.db.models import Count, Sum
 
 from apps.common.models import Currency
+from apps.common.serializers import LINE_COUNT_ANNOTATION
 from apps.common.services.periods import parse_period, within_period
 from apps.invoices.models import (
     ReturnInvoice,
@@ -180,9 +181,9 @@ def rep_dashboard(
             "paid_amount": decimal_string(sales_totals["paid_amount"]),
             "balance_due": decimal_string(sales_totals["balance_due"]),
             "invoices": list(
-                period_sales.select_related("customer", "rep", "warehouse").order_by(
-                    "-date", "-id"
-                )[:preview_limit]
+                period_sales.select_related("customer", "rep", "warehouse")
+                .annotate(**{LINE_COUNT_ANNOTATION: Count("lines")})
+                .order_by("-date", "-id")[:preview_limit]
             ),
         },
         "returns": {

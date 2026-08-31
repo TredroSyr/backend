@@ -27,6 +27,11 @@ if TYPE_CHECKING:
 # heads-up about interest, not as a confirmed order — no commitment has been made
 # and the sale only happens when the rep visits.
 CUSTOMER_REQUEST_CREATED = "customer_request.created"
+# The rep's answer, sent back to the customer. Accepting is a promise to visit,
+# not a reservation and not a confirmed order, so the copy stays a plain "yes,
+# I'll bring it" rather than anything that reads as a placed order.
+CUSTOMER_REQUEST_ACCEPTED = "customer_request.accepted"
+CUSTOMER_REQUEST_REJECTED = "customer_request.rejected"
 STOCK_TRANSFER_REQUESTED = "stock_transfer.requested"
 # Sent to the rep when the office starts the transfer itself. Distinct from
 # `.confirmed` on purpose: the rep is being told about goods they never asked
@@ -41,6 +46,14 @@ EVENT_COPY: dict[str, dict[str, str]] = {
     CUSTOMER_REQUEST_CREATED: {
         "title": "اهتمام جديد من عميل",
         "body": "أضاف العميل منتجات إلى قائمة رغباته — ليس طلباً مؤكداً، راجعها قبل زيارتك القادمة.",
+    },
+    CUSTOMER_REQUEST_ACCEPTED: {
+        "title": "وافق المندوب على طلبك",
+        "body": "سيحضر المندوب المنتجات المطلوبة في زيارته القادمة.",
+    },
+    CUSTOMER_REQUEST_REJECTED: {
+        "title": "تعذر تنفيذ طلبك",
+        "body": "اعتذر المندوب عن تنفيذ الطلب. يمكنك التواصل معه لمعرفة التفاصيل.",
     },
     STOCK_TRANSFER_REQUESTED: {
         "title": "طلب بضاعة جديد",

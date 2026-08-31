@@ -9,6 +9,8 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
+from django.db.models import Q
+
 from apps.common.models import Currency
 from apps.products.models import PriceType, ProductPrice
 
@@ -232,6 +234,57 @@ def calculate_price_with_tax(
     }
 
 
+def prices_by_product(
+    product_ids: Sequence[int],
+    *,
+    currency_code: str,
+    category_ids: Sequence[int] = (),
+    price_type: str = PriceType.STANDARD,
+) -> dict[tuple[int, int | None], Decimal]:
+    """Every price a listing might need, in one query, keyed by (product, category).
+
+    `resolve_product_price` answers for one product and costs a query each; a
+    listing — a van's contents, a page of customer requests — needs the same
+    answer for every row and would otherwise fire one query per line.
+
+    Both the general rows (`category` key `None`) and any category overrides asked
+    for come back together; `price_for` below applies the same precedence
+    `resolve_product_price` does. Missing combinations are simply absent, the way
+    `resolve_unit_price` returns None rather than raising.
+    """
+    product_ids = set(product_ids)
+    if not product_ids:
+        return {}
+
+    currency = Currency.objects.filter(code=currency_code, is_active=True).first()
+    if currency is None:
+        return {}
+
+    rows = ProductPrice.objects.filter(
+        product_id__in=product_ids,
+        currency_id=currency.id,
+        price_type=price_type,
+    ).filter(
+        Q(customer_category__isnull=True)
+        | Q(customer_category_id__in=set(category_ids))
+    )
+
+    return {(row.product_id, row.customer_category_id): row.price for row in rows}
+
+
+def price_for(
+    prices: dict, product_id: int, category_id: int | None = None
+) -> Decimal | None:
+    """A category override if there is one, else the general price, else None.
+
+    The same precedence `resolve_product_price` applies, so a batched listing and
+    a single lookup cannot quote two different numbers for one product.
+    """
+    if category_id is not None and (product_id, category_id) in prices:
+        return prices[(product_id, category_id)]
+    return prices.get((product_id, None))
+
+
 def general_prices_by_product(
     product_ids: Sequence[int],
     *,
@@ -240,29 +293,14 @@ def general_prices_by_product(
 ) -> dict[int, Decimal]:
     """The general price of many products at once, keyed by product id.
 
-    `resolve_product_price` answers for one product and costs a query each; a
-    listing — a van's contents, a catalog page — needs the same answer for every
-    row and would otherwise fire one query per product.
-
-    Only the general (no customer category) price is read, which is the whole
-    rule when there is no customer in context: nobody is being quoted, the number
-    is the shelf price. Missing products are simply absent from the mapping, the
-    same way `resolve_unit_price` returns None rather than raising.
+    The shelf price: what a product costs with no customer in context, which is
+    the whole rule when nobody is being quoted.
     """
-    product_ids = {product_id for product_id in product_ids}
-    if not product_ids:
-        return {}
-
-    currency = Currency.objects.filter(code=currency_code, is_active=True).first()
-    if currency is None:
-        return {}
-
+    prices = prices_by_product(
+        product_ids, currency_code=currency_code, price_type=price_type
+    )
     return {
-        row.product_id: row.price
-        for row in ProductPrice.objects.filter(
-            product_id__in=product_ids,
-            currency_id=currency.id,
-            price_type=price_type,
-            customer_category__isnull=True,
-        )
+        product_id: price
+        for (product_id, category_id), price in prices.items()
+        if category_id is None
     }

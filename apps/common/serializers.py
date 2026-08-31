@@ -44,3 +44,27 @@ class AuditLogSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = fields
+
+
+#: Annotation name a queryset uses to pre-count a document's lines. Deliberately
+#: not `line_count`: that is the serializer field, and an annotation of the same
+#: name would shadow it depending on which queryset the object arrived on.
+LINE_COUNT_ANNOTATION = "line_count_value"
+
+
+def line_count_of(document) -> int:
+    """How many lines a document has, by whichever route is already paid for.
+
+    Every document list prints this and the three audiences reach it differently:
+    a list annotates the count, a detail view has prefetched the lines anyway, and
+    a one-off object (the invoice handed back after recording a payment) has
+    neither. Without the first two branches this is one query per row.
+    """
+    annotated = getattr(document, LINE_COUNT_ANNOTATION, None)
+    if annotated is not None:
+        return annotated
+
+    if "lines" in getattr(document, "_prefetched_objects_cache", {}):
+        return len(document.lines.all())
+
+    return document.lines.count()

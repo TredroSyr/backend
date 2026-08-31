@@ -149,6 +149,7 @@ GET /api/reps/dashboard/?limit=2
           "company_name": "Tredro Foods",
           "tax_registration_no": "",
           "currency": "SYP",
+          "line_count": 1,
           "total_amount": "30.00",
           "paid_amount": "10.00",
           "returned_amount": "10.00",
@@ -260,6 +261,10 @@ not hard-code one.
 | `paid_amount` | Of that period's invoices, how much has been paid **to date** |
 | `balance_due` | Of that period's invoices, how much is still owed |
 | `invoices[]` | First `limit` rows, newest first — identical shape to the sales list |
+
+Every sales-invoice row also carries `line_count` — how many products are on the
+invoice, the `N صنف` the list prints beside the date. It is counted in the list
+query itself, so it costs nothing per row.
 
 `paid_amount` and `balance_due` describe *those invoices' current state*, not cash
 collected during the window. For cash-in over a window, read
@@ -700,8 +705,9 @@ A request is a *wishlist signal*, not an order — nothing is reserved and nothi
 is owed. Filter to `?status=pending` for "still outstanding". A rep resolves one
 by passing its id in `fulfils_request_ids` when writing the sales invoice.
 
-**`الفواتير`** — rows come from `SalesInvoiceSerializer` (see §3). The badge maps
-from `status`:
+**`الفواتير`** — rows come from `SalesInvoiceSerializer` (see §3), which carries
+`line_count`: the `N صنف` printed beside the date, i.e. how many products the
+invoice holds. The badge maps from `status`:
 
 | `status` | Badge |
 |---|---|
@@ -767,3 +773,279 @@ to the admin dashboard.
 - **`address` is `""` when unset**, never `null` — every customer created before
   this field reads `""`.
 - **404, not 403**, when opening a store that is not assigned to you.
+
+
+---
+---
+
+# Rep App API — Orders
+
+The rep's orders screen (`الطلبات`): what customers have asked for, and the rep's
+answer. One endpoint family — `/api/reps/customer-requests/`.
+
+---
+
+## 12. What a request is, and what answering one does
+
+A customer request is a **wishlist signal**, not an order. The customer app sends
+it; nothing is reserved, no stock moves, no money is owed.
+
+Answering does not change that:
+
+- **`قبول` (accept)** is a promise to visit, not a reservation. The goods stay in
+  the van, sellable to whoever the rep reaches first.
+- **`رفض` (reject)** is a decline, optionally with a reason the customer sees.
+- **Neither moves stock nor creates a debt.**
+
+**`تم التسليم` is not an endpoint here.** A delivery is a Sales Invoice — the only
+document that deducts the van and creates the debt — so the button opens the
+invoice screen prefilled from the request's lines, and the request is marked
+delivered by that invoice:
+
+```
+                POST /reps/customer-requests/{id}/accept/
+  pending ──────────────────────────────────────> accepted
+     │                                               │
+     │  POST .../reject/                             │  POST /api/reps/sales-invoices/
+     ▼                                               │  { fulfils_request_ids: [id] }
+  rejected                                           ▼
+                                                 fulfilled
+```
+
+A request may also reach `cancelled` — the **customer** withdrawing it from their
+own app. `rejected` and `cancelled` are both closed-without-delivery but are not
+the same event, and the API keeps them apart so either side can see who ended it.
+
+Both `pending` and `accepted` are deliverable. Only `fulfilled`, `rejected` and
+`cancelled` are closed.
+
+### Status → UI
+
+| `status` | Badge | Buttons |
+|---|---|---|
+| `pending` | `بانتظار الموافقة` | `قبول` / `رفض` |
+| `accepted` | `مقبول` | `تم التسليم` → invoice screen |
+| `fulfilled` | `تم التسليم` | none |
+| `rejected` | `مرفوض` | none |
+| `cancelled` | withdrawn by customer | none |
+
+The filter tabs map straight onto `?status=`: `الكل` (omit), `معلق` → `pending`,
+`مقبول` → `accepted`, `مسلم` → `fulfilled`, `مرفوض` → `rejected`.
+
+---
+
+## 13. `GET /api/reps/customer-requests/`
+
+Scoped to the authenticated rep. Newest first, paged.
+
+| Param | Meaning |
+|---|---|
+| `status` | One of the five above — the filter tabs |
+| `customer` | One store — the store page's `الطلبات السابقة` section |
+| `date`, `date_from`, `date_to` | Filters on `created_at`. Same whole-day rule as §3 |
+
+`ORDERS 4` is `data.pagination.count`.
+
+```json
+{
+  "success": true,
+  "message": "",
+  "data": {
+    "requests": [
+      {
+        "id": 1,
+        "company": 1,
+        "customer": 1,
+        "customer_name": "Abu Ahmad Market",
+        "customer_phone": "+963955555555",
+        "rep": 1,
+        "rep_name": "Sami",
+        "status": "pending",
+        "fulfilled_by_invoice": null,
+        "fulfilled_by_invoice_number": null,
+        "fulfilled_at": null,
+        "cancelled_at": null,
+        "accepted_at": null,
+        "rejected_at": null,
+        "rejection_reason": "",
+        "line_count": 2,
+        "notes": "",
+        "created_at": "2026-08-31T09:30:50.095404Z",
+        "updated_at": "2026-08-31T09:30:50.095414Z",
+        "lines": [
+          {
+            "id": 1,
+            "product": 1,
+            "product_name": "Rice 1kg",
+            "product_sku": "",
+            "unit": 1,
+            "unit_name": "Package",
+            "desired_quantity": "3.000",
+            "unit_price": "10.00",
+            "line_total": "30.00"
+          },
+          {
+            "id": 2,
+            "product": 2,
+            "product_name": "Sugar 1kg",
+            "product_sku": "",
+            "unit": 1,
+            "unit_name": "Package",
+            "desired_quantity": "24.000",
+            "unit_price": "5.00",
+            "line_total": "120.00"
+          }
+        ],
+        "estimated_total": "150.00"
+      }
+    ],
+    "pagination": { "count": 2, "page": 1, "page_size": 50, "total_pages": 1 }
+  }
+}
+```
+
+### The money on a card is indicative
+
+`unit_price`, `line_total` and `estimated_total` are **resolved from the catalog
+on read and never stored**. Nothing has been agreed — the rep prices the goods
+when the Sales Invoice is written, and the invoice is what binds.
+
+They are what this customer would be charged *today*, honouring their category
+override, so the number matches what the invoice screen will propose. If the
+catalog changes before the visit, the next read shows the new figure. That is
+correct: no price was ever promised.
+
+**`null` means "not priced", which is not "free".** A product the catalog has no
+price for in the company's currency comes back with `unit_price: null` and
+`line_total: null`, and is *skipped* rather than counted as zero when summing.
+`estimated_total` is `null` when nothing on the request could be priced — render
+"no price", not `0`. If a card must be honest about a partial total, compare each
+line's `unit_price` against null.
+
+### Other fields
+
+| Field | Notes |
+|---|---|
+| `line_count` | Rows on the request, for a summary badge |
+| `accepted_at` / `rejected_at` | Set by the two actions below |
+| `rejection_reason` | `""` unless the rep gave one. Shown to the customer |
+| `fulfilled_by_invoice_number` | The invoice that delivered it, e.g. `INV-SALE-00001` |
+| `notes` | Free text from the customer at request time |
+
+`GET /api/reps/customer-requests/{id}/` returns one, wrapped as `{"request": …}`,
+with the same shape. **404** if the request belongs to another rep.
+
+---
+
+## 14. Answering a request
+
+### `POST /api/reps/customer-requests/{id}/accept/`
+
+No body. Returns the updated request in the shape above:
+
+```json
+{
+  "success": true,
+  "message": "تم قبول الطلب",
+  "data": {
+    "request": {
+      "id": 2,
+      "status": "accepted",
+      "accepted_at": "2026-08-31T09:30:50.745503Z",
+      "rejection_reason": "",
+      "line_count": 1,
+      "lines": [ … ],
+      "estimated_total": "120.00"
+    }
+  }
+}
+```
+
+*(abridged — the response carries every field the list row does)*
+
+### `POST /api/reps/customer-requests/{id}/reject/`
+
+```json
+{ "reason": "المنتج غير متوفر حالياً" }
+```
+
+`reason` is optional; omit it or send `""` for a bare decline. It is stored on
+`rejection_reason` and shown to the customer.
+
+### Both
+
+**Only a `pending` request can be answered.** Accepting twice, or flipping an
+accepted request to rejected, returns **400**:
+
+```json
+{
+  "success": false,
+  "message": "لا يمكن الرد على طلب تم الرد عليه مسبقاً",
+  "errors": {
+    "status": ["Only a pending request can be answered; this one is 'accepted'."]
+  }
+}
+```
+
+Telling a customer yes and then silently switching to no is a conversation, not a
+status edit — so the API will not do it. Disable the buttons once `status` is
+anything but `pending`.
+
+The customer is notified either way, on their own bell
+(`GET /api/notifications/`, §5):
+
+| Event key | Copy |
+|---|---|
+| `customer_request.accepted` | `وافق المندوب على طلبك` |
+| `customer_request.rejected` | `تعذر تنفيذ طلبك` |
+
+---
+
+## 15. Delivering — `تم التسليم`
+
+There is no delivery endpoint on this viewset. The button opens the sales-invoice
+screen with the request's lines prefilled, and the rep posts:
+
+```http
+POST /api/reps/sales-invoices/
+Idempotency-Key: <uuid>
+```
+
+```json
+{
+  "customer": 1,
+  "lines": [{ "product": 1, "quantity": "12.000" }],
+  "fulfils_request_ids": [2],
+  "payment_amount": "120000.00"
+}
+```
+
+That one call deducts the van, creates the debt, records any cash collected, and
+flips the request to `fulfilled` with `fulfilled_by_invoice` and `fulfilled_at`
+set — all in one transaction. See [frontend4.md](frontend4.md) for the full sales
+flow.
+
+Things worth knowing:
+
+- **The invoice need not match the request.** A rep may deliver more, less, or
+  different products; prices are decided at invoice time. The request is a
+  starting point for the screen, not a contract.
+- **One invoice can fulfil several requests** — pass all their ids.
+- **`fulfils_request_ids` is optional.** A rep may sell to a walk-in with no
+  request at all.
+- **A closed request cannot be delivered against.** Passing a `fulfilled`,
+  `rejected` or `cancelled` id returns **400** naming the offending ids.
+
+---
+
+## 16. Things that will bite
+
+- **Prices are indicative and can be `null`.** Never render `null` as `0`.
+- **Accepting reserves nothing.** If the UI implies stock is held for that
+  customer, it is lying to both of them.
+- **Answer once.** Buttons are live only while `status == "pending"`.
+- **`rejected` ≠ `cancelled`.** The rep declined vs. the customer withdrew.
+- **Delivery goes through the invoice endpoint**, and the request updates itself
+  as a side effect — re-read it, or read `fulfilled_request_ids` off the invoice
+  response.
+- **404, not 403**, for another rep's request.

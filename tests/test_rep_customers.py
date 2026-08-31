@@ -324,3 +324,57 @@ def test_the_stores_list_is_rep_only(owner):
     )
 
     assert client.get("/api/reps/customers/").status_code == 403
+
+
+@pytest.mark.django_db
+def test_an_invoice_row_reports_how_many_products_it_holds(
+    company, rep, customer, stocked_rep_warehouse, product, other_product
+):
+    """The "N صنف" beside each invoice on the store page."""
+    two_products = create_sales_invoice(
+        company_id=company.id,
+        rep=rep,
+        customer=customer,
+        lines=[
+            LineInput(product=product, quantity=Decimal("6"), unit_price=Decimal("10.00")),
+            LineInput(
+                product=other_product, quantity=Decimal("10"), unit_price=Decimal("5.00")
+            ),
+        ],
+    )
+    one_product = make_sale(company, rep, customer, product)
+
+    client = client_for(rep)
+    rows = client.get(f"/api/reps/sales-invoices/?customer={customer.id}").json()["data"][
+        "invoices"
+    ]
+    counts = {row["number"]: row["line_count"] for row in rows}
+
+    assert counts[two_products.number] == 2
+    assert counts[one_product.number] == 1
+
+    # Same number on the detail read, and on the dashboard preview.
+    detail = client.get(f"/api/reps/sales-invoices/{two_products.id}/").json()["data"]
+    assert detail["invoice"]["line_count"] == 2
+
+    preview = client.get("/api/reps/dashboard/").json()["data"]["sales"]["invoices"]
+    assert {row["number"]: row["line_count"] for row in preview}[
+        two_products.number
+    ] == 2
+
+
+@pytest.mark.django_db
+def test_line_count_survives_a_payment_response(
+    company, rep, customer, stocked_rep_warehouse, product
+):
+    """The invoice echoed back after a collection has no annotation to read."""
+    invoice = make_sale(company, rep, customer, product)
+
+    response = client_for(rep).post(
+        "/api/reps/payments/",
+        {"sales_invoice": invoice.id, "amount": "25.00"},
+        format="json",
+    )
+
+    assert response.status_code == 201
+    assert response.json()["data"]["invoice"]["line_count"] == 1

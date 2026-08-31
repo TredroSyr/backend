@@ -17,7 +17,7 @@ Three audiences, three scoping rules:
 
 from __future__ import annotations
 
-from django.db.models import Prefetch, Q, Sum
+from django.db.models import Count, Prefetch, Q, Sum
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
@@ -25,6 +25,7 @@ from rest_framework.views import APIView
 
 from apps.common.modules import INVOICES, REPORTS, SETTINGS
 from apps.common.services.idempotency import IdempotentWriteMixin
+from apps.common.serializers import LINE_COUNT_ANNOTATION
 from apps.common.services.periods import filter_by_period
 from apps.companies.mixins import (
     AuditHistoryMixin,
@@ -263,8 +264,17 @@ def document_lines(line_queryset) -> Prefetch:
 
 
 def sales_invoice_queryset(base):
-    """Shared prefetching and filtering for both sales-invoice audiences."""
-    return base.select_related("rep", "customer", "warehouse")
+    """Shared prefetching and filtering for both sales-invoice audiences.
+
+    `line_count_value` is counted in the same query rather than per row: every
+    list prints "N صنف" beside the number, and reading it off each invoice is
+    the difference between one query and one per invoice. Safe to annotate here
+    because every filter these lists apply is on a local column — nothing joins
+    a second reverse relation that the join would multiply against.
+    """
+    return base.select_related("rep", "customer", "warehouse").annotate(
+        **{LINE_COUNT_ANNOTATION: Count("lines")}
+    )
 
 
 def annotated_sales_lines():

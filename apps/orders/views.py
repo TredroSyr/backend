@@ -20,6 +20,7 @@ from rest_framework.permissions import IsAuthenticated
 
 from apps.common.modules import CUSTOMER_REQUESTS, STOCK_TRANSFERS
 from apps.common.services.idempotency import IdempotentWriteMixin
+from apps.common.services.periods import filter_by_period
 from apps.companies.mixins import (
     AuditHistoryMixin,
     CompanyContextMixin,
@@ -39,6 +40,7 @@ from apps.orders.serializers import (
     StockTransferSerializer,
 )
 from apps.orders.services import requests as request_service
+from apps.orders.services.request_pricing import price_requests
 from apps.orders.services import transfers as transfer_service
 from apps.reps.permissions import IsRep
 from core.responses import success_response
@@ -52,10 +54,16 @@ def transfer_queryset(base, *, detailed: bool):
 
 
 def request_queryset(base, *, detailed: bool):
+    """Requests carrying what every audience renders.
+
+    Lines are prefetched either way: `detailed` decides whether their product and
+    unit come too, but even a summary row prints `line_count`, and reading that
+    per row is the difference between one query and one per request.
+    """
     queryset = base.select_related("customer", "rep", "fulfilled_by_invoice")
     if detailed:
-        queryset = queryset.prefetch_related("lines__product", "lines__unit")
-    return queryset
+        return queryset.prefetch_related("lines__product", "lines__unit")
+    return queryset.prefetch_related("lines")
 
 
 class StockTransferViewSet(
@@ -346,20 +354,33 @@ class CustomerRequestViewSet(
 class RepCustomerRequestViewSet(
     CompanyContextMixin, PaginatedListMixin, viewsets.GenericViewSet
 ):
-    """`/api/reps/customer-requests/` — what the rep should bring on the next visit.
+    """`/api/reps/customer-requests/` — the rep's orders screen (الطلبات).
 
-    A request is a heads-up about interest, not a confirmed order. The rep
-    resolves one by passing its id as `fulfils_request_ids` when creating the
-    Sales Invoice, so there is no "fulfil" action here.
+    A request is a heads-up about interest, not a confirmed order, and answering
+    it does not change that: `accept` is a promise to visit, `reject` is a
+    decline, and **neither moves stock nor creates a debt**. Nothing is reserved
+    by accepting — the goods stay in the van, sellable to whoever the rep reaches
+    first.
 
-    Filters: `status`, `customer` — the latter is what the store page's
-    "الطلبات السابقة" section calls.
+    **Delivery is not an action here.** A rep marks a request delivered by
+    writing the Sales Invoice with `fulfils_request_ids`, because that invoice is
+    the only document that deducts the van and creates the debt. A status
+    transition that skipped it would show goods delivered with nothing behind
+    them. So the screen's "تم التسليم" button opens the invoice screen; it does
+    not call this viewset.
 
-    **Lines are included in the list here**, unlike the admin endpoint. The whole
-    content of a request is a handful of product rows, and they are the point of
-    the screen: a list of requests without them says a customer wants *something*.
-    They are prefetched, so this costs one extra query for the page, not one per
-    request.
+        pending ──accept──> accepted ──POST /reps/sales-invoices/──> fulfilled
+           │                    │        (fulfils_request_ids)
+           └──reject──> rejected└────────────────────────────────────┘
+
+    Filters: `status` (drives the الكل/معلق/مقبول/مسلم/مرفوض tabs), `customer`
+    (the store page's "الطلبات السابقة" section).
+
+    **Lines are included in the list here**, unlike the admin endpoint, priced at
+    today's catalog rates. The rows are the point of the screen — a list of
+    requests without them says a customer wants *something* — and a rep cannot
+    judge "accept" without seeing what it is worth. Both are batched: one extra
+    query for the page, not one per request.
     """
 
     permission_classes = [IsAuthenticated, IsRep]
@@ -385,14 +406,71 @@ class RepCustomerRequestViewSet(
             if value:
                 queryset = queryset.filter(**{field: value})
 
-        return queryset.order_by("-created_at", "-id")
+        return filter_by_period(queryset, params, field="created_at").order_by(
+            "-created_at", "-id"
+        )
+
+    def get_serializer_context(self):
+        """Prices for the page being rendered.
+
+        `PaginatedListMixin.paginated_response` slices the page before it builds
+        the serializer, so by the time this runs the paginator knows which rows
+        are going out and they can be priced in one batch. Detail actions have no
+        page and pass their own context through `priced()`.
+        """
+        context = super().get_serializer_context()
+        page = getattr(getattr(self, "paginator", None), "page", None)
+        context["line_prices"] = price_requests(
+            list(page) if page is not None else [], company=self.company
+        )
+        return context
+
+    def priced(self, requests):
+        """Serializer context carrying catalog prices for specific rows."""
+        return {
+            **super().get_serializer_context(),
+            "line_prices": price_requests(requests, company=self.company),
+        }
 
     def list(self, request, *args, **kwargs):
         return self.paginated_response(self.get_queryset())
 
     def retrieve(self, request, *args, **kwargs):
+        customer_request = self.get_object()
         return success_response(
-            data={"request": self.get_serializer(self.get_object()).data}
+            data={
+                "request": self.get_serializer(
+                    customer_request, context=self.priced([customer_request])
+                ).data
+            }
+        )
+
+    @action(detail=True, methods=["post"])
+    def accept(self, request, *args, **kwargs):
+        """`POST {id}/accept/` — yes, I will bring this. Only from `pending`."""
+        customer_request = request_service.accept_customer_request(
+            self.get_object(), request=request
+        )
+        return self._answered(customer_request, "تم قبول الطلب")
+
+    @action(detail=True, methods=["post"])
+    def reject(self, request, *args, **kwargs):
+        """`POST {id}/reject/` — no. Optional `reason`, shown to the customer."""
+        customer_request = request_service.reject_customer_request(
+            self.get_object(),
+            reason=(request.data.get("reason") or "").strip(),
+            request=request,
+        )
+        return self._answered(customer_request, "تم رفض الطلب")
+
+    def _answered(self, customer_request, message: str):
+        return success_response(
+            data={
+                "request": self.get_serializer(
+                    customer_request, context=self.priced([customer_request])
+                ).data
+            },
+            message=message,
         )
 
 

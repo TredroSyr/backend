@@ -17,6 +17,8 @@ from decimal import Decimal
 from django.utils import timezone
 from rest_framework import serializers
 
+from apps.common.serializers import line_count_of
+
 from apps.common.models import Currency
 from apps.customers.models import Customer
 from apps.invoices.models import (
@@ -337,6 +339,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
     overage_amount = serializers.DecimalField(
         max_digits=14, decimal_places=2, read_only=True
     )
+    line_count = serializers.SerializerMethodField()
 
     class Meta:
         model = SalesInvoice
@@ -344,6 +347,7 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             "id",
             "number",
             "date",
+            "line_count",
             "rep",
             "rep_name",
             "customer",
@@ -364,6 +368,16 @@ class SalesInvoiceSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = fields
+
+    def get_line_count(self, obj) -> int:
+        """How many product lines the invoice has — the "N صنف" on a list row.
+
+        Three ways to get it, cheapest first, because the three callers arrive
+        differently: the list endpoints annotate it, the detail endpoints have
+        already prefetched the lines, and a one-off (the object returned after
+        recording a payment) has neither and can afford the single query.
+        """
+        return line_count_of(obj)
 
 
 class SalesInvoiceDetailSerializer(SalesInvoiceSerializer):

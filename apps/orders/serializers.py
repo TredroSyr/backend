@@ -12,6 +12,7 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
+from apps.common.serializers import line_count_of
 from apps.companies.models import Company
 from apps.orders.models import (
     CustomerRequest,
@@ -22,6 +23,7 @@ from apps.orders.models import (
 from apps.products.models import Warehouse
 from apps.products.services.lookup import products_by_id
 from apps.reps.models import Rep
+from core.responses import decimal_string
 
 QUANTITY_KWARGS = {"max_digits": 14, "decimal_places": 3, "min_value": Decimal("0.001")}
 
@@ -200,6 +202,18 @@ class StockTransferModifySerializer(serializers.Serializer):
 
 
 class CustomerRequestLineSerializer(ProductLineReadSerializer):
+    """A wanted product, with what it would cost today.
+
+    `unit_price` and `line_total` are **indicative, not agreed**: nothing is
+    stored on the line, and both are resolved from the catalog on read by
+    `orders.services.request_pricing`. They are null when the caller did not ask
+    for pricing, or when the catalog has no price for that product — null means
+    "not priced", which is not the same claim as zero.
+    """
+
+    unit_price = serializers.SerializerMethodField()
+    line_total = serializers.SerializerMethodField()
+
     class Meta:
         model = CustomerRequestLine
         fields = [
@@ -210,8 +224,21 @@ class CustomerRequestLineSerializer(ProductLineReadSerializer):
             "unit",
             "unit_name",
             "desired_quantity",
+            "unit_price",
+            "line_total",
         ]
         read_only_fields = fields
+
+    def _price(self, obj):
+        return (self.context.get("line_prices") or {}).get(obj.id)
+
+    def get_unit_price(self, obj):
+        price = self._price(obj)
+        return decimal_string(price) if price is not None else None
+
+    def get_line_total(self, obj):
+        price = self._price(obj)
+        return decimal_string(price * obj.desired_quantity) if price is not None else None
 
 
 class CustomerRequestSerializer(serializers.ModelSerializer):
@@ -223,6 +250,7 @@ class CustomerRequestSerializer(serializers.ModelSerializer):
     fulfilled_by_invoice_number = serializers.CharField(
         source="fulfilled_by_invoice.number", read_only=True, allow_null=True
     )
+    line_count = serializers.SerializerMethodField()
 
     class Meta:
         model = CustomerRequest
@@ -239,19 +267,49 @@ class CustomerRequestSerializer(serializers.ModelSerializer):
             "fulfilled_by_invoice_number",
             "fulfilled_at",
             "cancelled_at",
+            "accepted_at",
+            "rejected_at",
+            "rejection_reason",
+            "line_count",
             "notes",
             "created_at",
             "updated_at",
         ]
         read_only_fields = fields
 
+    def get_line_count(self, obj) -> int:
+        return line_count_of(obj)
+
 
 class CustomerRequestDetailSerializer(CustomerRequestSerializer):
+    """Adds the lines, and the card total they add up to."""
+
     lines = CustomerRequestLineSerializer(many=True, read_only=True)
+    estimated_total = serializers.SerializerMethodField()
 
     class Meta(CustomerRequestSerializer.Meta):
-        fields = [*CustomerRequestSerializer.Meta.fields, "lines"]
+        fields = [
+            *CustomerRequestSerializer.Meta.fields,
+            "lines",
+            "estimated_total",
+        ]
         read_only_fields = fields
+
+    def get_estimated_total(self, obj):
+        """What the request is worth at today's catalog prices.
+
+        Null when nothing on it could be priced, so the card can say "no price"
+        rather than print a confident zero. A line the catalog cannot price is
+        skipped rather than counted as free, so compare `lines[].unit_price`
+        against null if the distinction matters to the screen.
+        """
+        prices = self.context.get("line_prices") or {}
+        priced = [
+            prices[line.id] * line.desired_quantity
+            for line in obj.lines.all()
+            if line.id in prices
+        ]
+        return decimal_string(sum(priced)) if priced else None
 
 
 class CustomerRequestCreateSerializer(ProductLinesWriteMixin, serializers.Serializer):

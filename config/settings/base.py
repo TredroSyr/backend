@@ -49,6 +49,7 @@ CORS_ALLOW_HEADERS = [
     "authorization",
     "content-type",
     "origin",
+    "idempotency-key",
 ]
 
 INSTALLED_APPS = [

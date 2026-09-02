@@ -23,8 +23,8 @@ RUN pip install --upgrade pip \
 COPY . .
 
 RUN adduser --disabled-password --gecos "" appuser \
-    && mkdir -p /app/staticfiles /app/media \
-    && chown -R appuser:appuser /app
+    && mkdir -p /app/staticfiles /app/media /var/lib/celery \
+    && chown -R appuser:appuser /app /var/lib/celery
 
 USER appuser
 

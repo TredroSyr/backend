@@ -141,19 +141,13 @@ pip install -r requirements.txt
 
 Point `DATABASE_HOST` / `REDIS_URL` at Compose-published ports (`localhost`) when running management commands on the host.
 
-## Production deployment concept (single Linux VPS)
+## Production deployment (single Linux VPS)
 
-1. Copy the project to the VPS.
-2. Create a production `.env` with strong secrets (`DJANGO_DEBUG=False`, real `DJANGO_SECRET_KEY`, locked-down `DJANGO_ALLOWED_HOSTS`).
-3. Start:
-
-```bash
-docker compose -f docker-compose.prod.yml up --build -d
-```
-
-4. Put Nginx or Caddy in front of `localhost:8000` for TLS and static/media later.
-5. Postgres and Redis stay on the internal Docker network (not published publicly).
-6. SSL/Cloudflare are intentionally out of scope for this foundation.
+The production Compose stack includes Caddy with automatic HTTPS, private
+Gunicorn/PostgreSQL/Redis networking, persistent static and media storage, and
+separate Celery services. Follow the complete provisioning, deployment,
+backup, update, and rollback runbook in
+[`deploy/VPS_DEPLOYMENT.md`](deploy/VPS_DEPLOYMENT.md).
 
 ## Useful commands
 

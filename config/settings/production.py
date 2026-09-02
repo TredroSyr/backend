@@ -15,6 +15,8 @@ if not SECRET_KEY or SECRET_KEY == "unsafe-dev-only-change-me":
 if not env("DATABASE_PASSWORD"):
     raise ValueError("DATABASE_PASSWORD must be set in production.")
 
+CSRF_TRUSTED_ORIGINS = env_list("DJANGO_CSRF_TRUSTED_ORIGINS")
+
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
